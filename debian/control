@@ -1,0 +1,41 @@
+Source: djbdns
+Section: non-free/net
+Priority: optional
+Maintainer: Adam D. McKenna <adam@debian.org>
+Standards-Version: 3.5.8
+
+Package: djbdns
+Architecture: any
+Depends: ${shlibs:Depends}, daemontools, make
+Recommends: ucspi-tcp
+Description: Replacement for BIND, written by Dan Bernstein.
+ The following were taken from various HTML pages under
+ http://cr.yp.to/djbdns.html
+ .
+ dnscache is a local DNS cache. It accepts recursive DNS queries from
+ local clients such as web browsers and mail transfer agents. It
+ collects responses from remote DNS servers. It caches the responses to
+ save time later.
+ .
+ tinydns is a DNS server. It accepts iterative DNS queries from hosts   
+ around the Internet, and responds with locally configured information. 
+ .
+ pickdns is a load-balancing DNS server. It accepts iterative DNS       
+ queries from hosts around the Internet, and responds with a dynamic    
+ selection of locally configured IP addresses with 5-second TTLs.       
+ .
+ walldns is a reverse DNS wall. It accepts iterative DNS queries for    
+ in-addr.arpa domains from hosts around the Internet, and supplies      
+ generic responses that avoid revealing local host information.         
+ .
+ rbldns is an IP-address-listing DNS server. It accepts iterative       
+ DNS queries from hosts around the Internet asking about various IP     
+ addresses.  It provides responses showing whether the addresses are on 
+ a locally configured list, such as RBL or DUL.                         
+ .
+ axfrdns is a DNS zone-transfer server. It reads a zone-transfer        
+ request in DNS-over-TCP format from its standard input, and responds   
+ with locally configured information.                                   
+ .
+ The security of this software is guaranteed by the author.  Details of
+ the guarantee can be found at http://cr.yp.to/djbdns/guarantee.html

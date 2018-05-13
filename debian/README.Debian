@@ -1,0 +1,12 @@
+dnscache for Debian
+----------------------
+
+The following are differences between an unmodified binary installation of
+dnscache, and the one installed by this package:
+
+- added "clean" target in Makefile
+- @ and VERSION install to /usr/share/dnscache instead of
+/usr/etc/dnscache to comply with FHS
+- binaries install to /usr instead of /usr/local
+
+ -- Adam D. McKenna <adam@flounder.net>, Mon, 27 Mar 2000 16:55:35 -0500

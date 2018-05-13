@@ -1,0 +1,17 @@
+Each instance of tinydns/axfrdns/walldns/rbldns can only listen on one IP address.
+
+If you wish to run any of these programs on multiple IP addresses on the same
+system, you need to create a separate control directory for each instance.
+
+For example, to run a second copy of tinydns on 1.2.3.5, you would perform the
+following steps:
+
+# tinydns-conf tinydns dnslog /etc/tinydns2 1.2.3.5
+# rm -rf /etc/tinydns2/root
+# ln -s /etc/tinydns/root /etc/tinydns2
+# ln -s /etc/tinydns2 /var/lib/svscan
+
+This will create a second instance of tinydns in /etc/tinydns2.  We then 
+remove tinydns2's current root directory and replace it with a symlink to the
+original data directory.  This avoids having multiple copies of your data file
+to keep track of.

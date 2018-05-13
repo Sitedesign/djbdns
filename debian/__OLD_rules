@@ -1,0 +1,79 @@
+#!/usr/bin/make -f
+
+#export DH_VERBOSE=1
+export DH_COMPAT=1
+
+PACKAGE := $(shell dpkg-parsechangelog | sed -n 's/^Source: //p')
+PKG_VER := $(shell dpkg-parsechangelog | sed -n 's/^Version: //p')
+PKG_UPVER       := $(shell dpkg-parsechangelog \
+| sed -n 's/^Version: \(.*\)-[^-]\+$$/\1/p')
+
+
+build: build-stamp
+build-stamp:
+	dh_testdir
+	
+	# Add here commands to compile the package.
+	echo /usr > conf-home
+	$(MAKE)
+
+	touch build-stamp
+
+clean:
+	dh_testdir
+	dh_testroot
+	rm -f build-stamp
+	rm -rf debian/tmp/
+	rm -f `cat TARGETS`
+	cp debian/conf-home.real conf-home || :
+	# Add here commands to clean up after the build process.
+	-$(MAKE) clean
+	dh_clean
+
+install: build
+	dh_testdir
+	dh_testroot
+	dh_installdirs
+
+	echo "$$PWD/debian/tmp/usr" > conf-home
+	rm install instcheck auto_home.c auto_home.o
+	make install
+	./install
+	cp -a dnsroots.global debian/tmp/etc/
+	cp debian/djbdns-conf-fhs debian/tmp/usr/bin
+	chmod 755 debian/tmp/usr/bin/djbdns-conf-fhs
+	dh_link usr/bin/djbdns-conf-fhs usr/bin/tinydns-conf-fhs
+	dh_link usr/bin/djbdns-conf-fhs usr/bin/walldns-conf-fhs
+	dh_link usr/bin/djbdns-conf-fhs usr/bin/pickdns-conf-fhs
+	dh_link usr/bin/djbdns-conf-fhs usr/bin/rbldns-conf-fhs
+	dh_link usr/bin/djbdns-conf-fhs usr/bin/dnscache-conf-fhs
+	dh_link usr/bin/djbdns-conf-fhs usr/bin/axfrdns-conf-fhs
+
+binary-arch: build install
+	dh_testdir
+	dh_testroot
+	dh_installdocs
+	dh_installinit -n
+	dh_installexamples
+	dh_installmanpages -pdjbdns
+	dh_installchangelogs CHANGES
+	dh_link
+	dh_strip
+	dh_compress
+	dh_fixperms
+	dh_installdeb
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dpkg-deb -b debian/tmp ..
+
+../$(PACKAGE)_$(PKG_UPVER).orig.tar.gz:
+		@{ echo "Error: $@ missing"; exit 1; }
+
+../$(PACKAGE)_$(PKG_VER).dsc ../$(PACKAGE)_$(PKG_VER).diff.gz: debian/rules
+		dh_clean
+		cd ..; dpkg-source -b $(PACKAGE)-$(PKG_UPVER)
+
+binary: binary-arch
+
+.PHONY: build clean binary-indep binary-arch binary install

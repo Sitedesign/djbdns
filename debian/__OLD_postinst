@@ -1,0 +1,53 @@
+#!/bin/sh -e
+# postinst for djbdns
+# written by Adam McKenna
+# <adam@debian.org>
+
+#DEBCONF_DEBUG=1
+#export DEBCONF_DEBUG
+
+case "$1" in
+    configure)
+	# continue below
+    ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+	exit 0
+    ;;
+
+    *)
+	echo "postinst called with unknown argument \`$1'" >&2
+	exit 0
+    ;;
+esac
+
+. /usr/share/debconf/confmodule
+
+umask 022
+
+# add necessary users
+
+if ! grep -q '^dnslog:' /etc/passwd; then 
+    adduser --quiet --system --no-create-home --disabled-password --home /var/log/dns --gecos "djbdns log user" dnslog
+fi
+
+if ! grep -q '^dnscache:' /etc/passwd; then 
+    adduser --quiet --system --no-create-home --disabled-password --home /etc/dnscache --gecos "dnscache daemon" dnscache
+fi
+
+if ! grep -q '^tinydns:' /etc/passwd; then 
+    adduser --quiet --system --no-create-home --disabled-password --home /etc/tinydns --gecos "tinydns daemon" tinydns 
+fi
+
+if ! grep -q '^axfrdns:' /etc/passwd; then 
+    adduser --quiet --system --no-create-home --disabled-password --home /etc/axfrdns --gecos "axfrdns daemon" axfrdns 
+fi
+
+echo "djbdns has been installed."
+echo ""
+echo "To set up services, please see the documentation at "
+echo "http://cr.yp.to/djbdns.html."
+
+#DEBHELPER#
+
+exit 0

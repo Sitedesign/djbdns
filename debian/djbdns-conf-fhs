@@ -1,0 +1,14 @@
+#! /bin/sh
+
+umask 022
+
+fhslogdir () {
+NEWLOGDIR=`basename $2`
+mkdir -p /var/log/djbdns/${NEWLOGDIR}
+rmdir ${2}/log/main
+ln -s /var/log/djbdns/${NEWLOGDIR} ${2}/log/main
+chown -R ${1} /var/log/djbdns/${NEWLOGDIR} ${2}/log/main
+}
+
+PROGRAM=`basename ${0%-fhs}`
+$PROGRAM $@ && fhslogdir $2 $3

@@ -1,0 +1,14 @@
+This package was debianized by Adam D. McKenna <adam@debian.org> on
+Mon, 27 Mar 2000 16:55:35 -0500.
+
+It was downloaded from http://cr.yp.to/www/dnscache/dnscache-1.00.tar.gz
+
+Upstream Author(s): Dan Bernstein <djb@cr.yp.to>
+
+Copyright:
+
+* dnscache:
+Copyright (C) 1999-2000 D. J. Bernstein <djb@pobox.com>
+
+* modifications for Debian:
+  Copyright (C) 2000 Software in the Public Interest <http://www.debian.org>

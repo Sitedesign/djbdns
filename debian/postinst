@@ -1,0 +1,1893 @@
+#!/bin/sh -e
+# postinst for djbdns
+# written by Adam McKenna
+# <adam@debian.org>
+# modified by lajjan according to our needs
+# <jlajos@icon.hu>
+
+#DEBCONF_DEBUG=1
+#export DEBCONF_DEBUG
+
+case "$1" in
+    configure)
+	# continue below
+    ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+	exit 0
+    ;;
+
+    *)
+	echo "postinst called with unknown argument \`$1'" >&2
+	exit 0
+    ;;
+esac
+
+if [ -d /var/dns ]; then
+	echo "djbdns configuration skeleton already exists, not touching."
+	exit 0
+fi
+
+. /usr/share/debconf/confmodule
+
+mkdir -p /var/dns
+
+umask 022
+
+# add necessary users
+
+if ! grep -q '^dnscache:' /etc/passwd; then 
+    adduser --quiet --system --no-create-home --disabled-password --home /var/dns --shell /bin/false dnscache
+fi
+
+if ! grep -q '^dnslog:' /etc/passwd; then 
+    adduser --quiet --system --no-create-home --disabled-password --home /var/dns --shell /bin/false dnslog
+fi
+
+if ! grep -q '^tinydns:' /etc/passwd; then 
+    adduser --quiet --system --no-create-home --disabled-password --home /var/dns --shell /bin/false tinydns
+fi
+
+if ! grep -q '^tinylog:' /etc/passwd; then 
+    adduser --quiet --system --no-create-home --disabled-password --home /var/dns --shell /bin/false tinylog
+fi
+
+if ! grep -q '^axfrdns:' /etc/passwd; then 
+    adduser --quiet --system --no-create-home --disabled-password --home /var/dns --shell /bin/false axfrdns
+fi
+
+if ! grep -q '^axfrlog:' /etc/passwd; then 
+    adduser --quiet --system --no-create-home --disabled-password --home /var/dns --shell /bin/false axfrlog
+fi
+
+echo "Please modify dnscache/tinydns/axfrdns config, according to your needs!"
+/usr/bin/dnscache-conf dnscache dnslog /var/dns/dnscache 127.0.0.1
+
+touch /var/dns/dnscache/root/ip/127.0.0.1
+chmod 644 /var/dns/dnscache/root/ip/127.0.0.1
+
+/usr/bin/tinydns-conf tinydns tinylog /var/dns/tinydns 127.0.0.1
+mkdir /var/dns/tinydns/root/primary /var/dns/tinydns/root/secondary /var/dns/tinydns/root/backup
+
+/usr/bin/axfrdns-conf axfrdns axfrlog /var/dns/axfrdns /var/dns/tinydns 127.0.0.1
+
+cat > /var/dns/tinydns/root/axfr.sh <<EOT
+#!/bin/bash
+#
+# 2003. jlajos@icon.hu
+#
+# This simple shell create master data file from primary and secondary name 
+# servers data.
+# Finally it creates data.cdb
+#
+# Please create manually backup, primary, secondary directories in tinydns root
+# Place primary zones into primary. Create directories in secondary, with name
+# of the server IPs, and subdirectories with name of the zones.
+# like this:
+#./primary
+#./primary/data1
+#./primary/data2
+#./primary/data3
+#./secondary
+#./secondary/1.1.1.1
+#./secondary/1.1.1.1/test1.com
+#./secondary/1.1.1.1/test1.com/test1.com.data
+#./secondary/1.1.1.1/test2.com
+#./secondary/1.1.1.1/test2.com/test2.com.data
+#./secondary/2.2.2.2
+#./secondary/2.2.2.2/test3.com
+#./secondary/2.2.2.2/test3.com/test3.com.data
+#./backup
+#
+
+TINYDNSDIR="/var/dns/tinydns/root"
+TEMPFILE=\`mktemp /tmp/dnssumdata.XXXXXX\`
+AXFRGET="/usr/bin/axfr-get"
+TCPCLIENT="/usr/bin/tcpclient -H -R -T 5+5"
+TDATA="/usr/bin/tinydns-data"
+LOCKFILE="/var/run/axfr.lock"
+LOGFILE="/var/log/\`basename \$0\`.log.\`date +'%Y%m%d'\`"
+
+export TINYDNSDIR TEMPFILE AXFRGET TCPCLIENT TDATA LOCKFILE LOGFILE
+
+cd \$TINYDNSDIR
+
+rm -f \$TEMPFILE
+
+if [ -f \$LOCKFILE ]; then
+        echo "There is another running instance of \$0 script." >> \$LOGFILE
+        exit 1
+fi
+touch \$LOCKFILE
+
+if [ ! -f \$LOGFILE ]; then
+        echo "Logfile started at: \`date +%H:%M:%S\`" >>\$LOGFILE
+fi
+
+if [ \`echo \$0 | grep "make.sh"\` ]; then SILENT=1; fi
+
+echo "--------/\---------" \`date +%H:%M:%S\` "---------/\--------" >>\$LOGFILE
+
+# copy primary zones
+if [ \`ls primary| wc -l|sed 's/\ *//'\` = 0 ]; then
+	echo "Sorry, primary zone not found!" >>\$LOGFILE
+	rm -f \$LOCKFILE
+	exit 1
+fi
+for i in primary/*; do
+	echo "############################" >>\$TEMPFILE
+	echo "# imported from \$i zone file" >>\$TEMPFILE
+	echo "############################" >>\$TEMPFILE
+	cat \$i >>\$TEMPFILE
+	echo "import done:  \$i" >>\$LOGFILE
+done
+
+# get secondaries
+if [ ! \`ls secondary| wc -l|sed 's/\ *//'\` = 0 ]; then
+echo "#################################" >>\$TEMPFILE
+echo "# here comes the secondaries data" >>\$TEMPFILE
+echo "#################################" >>\$TEMPFILE
+echo >>\$TEMPFILE
+cd secondary
+for i in *; do
+	cd \$i
+	for j in *; do
+		cd \$j
+		# \$TCPCLIENT \$i 53 \$AXFRGET \$j \$j.data \$j.temp 2>>\$LOGFILE
+		# modified to suiteble CIDR zones (127-46.46.46.1.in-addr.arpa.)
+		echo \$j | grep "in-addr.arpa" >/dev/null; err=\$?
+		if [ \$err = 0 ]; then
+		   k=\`echo \$j | sed -e 's/\-/\//' -e 's/in\/addr/in-addr/'\`
+		else
+		   k=\$j
+		fi
+		if [ ! \$SILENT ]; then
+		   \$TCPCLIENT \$i 53 \$AXFRGET \$k \$j.data \$j.temp 2>>\$LOGFILE
+		else
+		   echo "Silently skip real zone transfers, just build datas."
+		fi
+		if [ \$? = 0 ]; then
+			echo "#################################" >>\$TINYDNSDIR/\$TEMPFILE
+			echo "# \$k zone from \$i server" >>\$TINYDNSDIR/\$TEMPFILE
+			echo "#################################" >>\$TINYDNSDIR/\$TEMPFILE
+			cat \$j.data >>\$TINYDNSDIR/\$TEMPFILE
+			echo "secondary zone axfr done:  \$k" >>\$LOGFILE
+		else
+			echo "ERROR occured at \$k zone from \$i server" >>\$LOGFILE
+		fi
+		cd ..
+	done
+	cd ..
+done
+fi
+
+cd \$TINYDNSDIR
+mv data backup/data.\`date +'%Y%m%d-%H%M%S'\`
+mv \$TEMPFILE data
+echo "Backing up old data file" >>\$LOGFILE
+\$TDATA
+echo "Create data.cdb" >>\$LOGFILE
+
+echo "--------\/---------" \`date +%H:%M:%S\` "---------\/--------" >>\$LOGFILE
+rm -f \$LOCKFILE
+EOT
+
+cd /var/dns/tinydns/root
+chmod 755 axfr.sh
+ln -s axfr.sh make.sh
+
+cat > /var/dns/axfrdns/tcp << EOT
+# sample line allow axfr request from host 1.2.3.4 to internal.hu and 10.168.192.in-addr.arpa datas"
+# dont forget to run " tcprules tcp.cdb tcp.tmp < tcp "
+#1.2.3.4:allow,AXFR="mintadomain.hu/10.168.192.in-addr.arpa"
+:deny
+EOT
+
+cat > /var/dns/tinydns/root/data.example << EOT
+#
+# if you modify this file dont forget to run tinydns-data binary!
+#
+
+# localhost
+=localhost.mintadomain.hu:127.0.0.1:86400
+
+# normal zones soa
+Zmintadomain.hu:ns1.mintadomain.hu.:hostmaster.mintadomain.hu.:200306160:43200:14400:2592000:86400:3600
+&mintadomain.hu:1.1.1.1:ns1.mintadomain.hu:3600
+Zmintadomain.hu:ns2.mintadomain.hu.:hostmaster.mintadomain.hu.:200306160:43200:14400:2592000:86400:3600
+&mintadomain.hu:1.1.1.2:ns2.mintadomain.hu:3600
+
+# reverse zones soa
+Z128/25.3.2.1.in-addr.arpa:ns1.mintadomain.hu.:hostmaster.mintadomain.hu.:200306160:43200:14400:2592000:86400:3600
+&128/25.3.2.1.in-addr.arpa:1.1.1.1:ns1.mintadomain.hu:3600
+Z128/25.3.2.1.in-addr.arpa:ns2.mintadomain.hu.:hostmaster.mintadomain.hu.:200306160:43200:14400:2592000:86400:3600
+&128/25.3.2.1.in-addr.arpa:1.1.1.2:ns2.mintadomain.hu:3600
+
+# MX records
+@mintadomain.hu:1.2.3.4:mail.mintadomain.hu:10:86400
+@mintadomain.hu:1.2.3.5:mail2.mintadomain.hu:20:86400
+
+# Normal hosts/aliases
+=www.mintadomain.hu:4.4.4.4:86400
++www2.mintadomain.hu:4.4.4.4:86400
++www3.mintadomain.hu:4.4.4.4:86400
+=ftp.mintadomain.hu:7.7.7.7:86400
+=mintahost.mintadomain.hu:1.2.3.130:86400
+=mintahost2.mintadomain.hu:1.2.3.131:86400
+
+# Reverse entities
+^130.128/25.3.2.1.in-addr.arpa:mintahost.mintadomain.hu:86400
+^131.128/25.3.2.1.in-addr.arpa:mintahost2.mintadomain.hu:86400
+EOT
+
+cat > /var/dns/dnscache/README.dnscache-config << EOT
+dnscache
+--------
+
+= futtatas
+
+	ln -sf /var/dns/dnscache /service
+
+= tobb interfesz bind
+
+	env/IP allomanyban 1.1.1.1/2.2.2.2
+
+= root ns megadas
+
+	root/servers/@ allomanyba IP cim
+
+= zona kovetes
+	root/servers/[ZONANEVE] allomanyba IP cim
+	pl. root/servers/icon.hu, root/servers/100.168.192.in-addr.arpa
+
+= acl
+	root/ip konyvtarban letre kell hozni a megfelelo network nevu allomanyt,pl.
+	127.0.0.1
+	192.168.100
+	172.16
+
+= naplo
+	log/main/current allomanyban
+EOT
+
+cat > /var/dns/tinydns/README.tinydns-config << EOT
+tinydns
+--------
+
+= futtatas
+
+	ln -sf /var/dns/tinydns /service
+
+= tobb interfesz bind
+
+	env/IP allomanyban 1.1.1.1/2.2.2.2
+
+= RR konfig
+
+cd /var/dns/tinydns/tinydns/root
+./add-ns internal 10.20.30.12
+./add-ns 30.20.10.in-addr.arpa 10.20.30.12
+./add-mx internal 10.20.30.4
+./add-host ns.internal 10.20.30.12
+./add-host mail.internal 10.20.30.4
+./add-alias unagi.internal 10.20.30.4
+./add-childns elysium.heaven.af.mil 1.2.3.144
+
+majd futtatni kell a /usr/bin/tinydns-data filet, ami meggyartja a data.cdb-t
+
+= naplo
+	log/main/current allomanyban
+
+= ha modositani kell a SOA-t, es nem jo ugy ahogyan a tinydns generalja, akkor
+
+	Ztest2.hu:ns1.test2.hu.:hostmaster.test2.hu.:10455
+	&test2.hu:5.5.5.5:ns1.test.hu
+
+= extra!
+
+For versions 1.04 and above: You may include a client location on each line. The line is ignored for clients outside that location. Client locations are specified by % lines: 
+
+     %lo:ipprefix
+means that IP addresses starting with ipprefix are in location lo. lo is a sequence of one or two ASCII letters. A client is in only one location; longer prefixes override shorter prefixes. For example, 
+
+     %in:192.168
+     %ex
+     +jupiter.heaven.af.mil:192.168.1.2:::in
+     +jupiter.heaven.af.mil:1.2.3.4:::ex
+specifies that jupiter.heaven.af.mil has address 192.168.1.2 for clients in the 192.168.* network and address 1.2.3.4 for everyone else. 
+
+EOT
+
+cat > /var/dns/axfrdns/README.axfrdns-config << EOT
+axfrdns
+--------
+
+= futtatas
+
+	ln -sf /var/dns/axfrdns /service
+
+= tobb interfesz specifikus bind-ot nem tud, 0 ertek minden lokalis interfeszt jelent, vagy IP cim eseten egyedul arra bindol
+
+	env/IP allomanyban 1.1.1.1
+
+= acl
+	tcp allomany, le kell "forditani" cdb-re!
+
+	tcprules tcp.cdb tcp.tmp < tcp
+
+= naplo
+	log/main/current allomanyban
+
+= teszteleshez
+
+	/usr/bin/tcpclient [IP] 53 axfr-get [ZONE] data data.tmp
+EOT
+
+cat > /var/dns/dnscache/README.cachesize << EOT
+How to adjust the cache size
+By default, dnscache uses 1 megabyte of memory for its cache. You can restart it with a 100-megabyte cache as follows: 
+
+     echo 100000000 > /service/dnscache/env/CACHESIZE
+     echo 104857600 > /service/dnscache/env/DATALIMIT
+     svc -t /service/dnscache
+dnscache services created with djbdns 1.00 or earlier do not have the /env directory. Instead edit /service/dnscache/run; change CACHESIZE=1000000 to CACHESIZE=100000000 and -d3000000 to -d104857600. 
+EOT
+
+cat > /var/dns/tinydns/README.in-addr.arpa.delegation << EOT
+
+D. J. Bernstein 
+Internet publication 
+djbdns 
+
+How to receive a delegation from .in-addr.arpa 
+If you are in charge of a block of IP addresses, and you want to provide reverse 
+lookups for those IP addresses, you will need a corresponding name in the in-addr.arpa 
+domain. For example, if you are in charge of IP addresses 1.8.7.0 through 
+1.8.7.255, the domain 7.8.1.in-addr.arpa should be delegated to you. 
+
+For concreteness, these instructions assume that the name is 7.8.1.in-addr.arpa, 
+and that you have two computers running DNS servers, the first server on IP 
+address 1.8.7.200 and the second server on IP address 1.8.7.201. 
+
+The normal procedure has two steps. First, tell your DNS servers that they 
+should answer questions for 7.8.1.in-addr.arpa, and that they should announce 
+1.8.7.200 and 1.8.7.201 as the DNS server addresses for 7.8.1.in-addr.arpa: 
+
+     cd /service/tinydns/root
+     ./add-ns 7.8.1.in-addr.arpa 1.8.7.200
+     ./add-ns 7.8.1.in-addr.arpa 1.8.7.201
+     make
+Second, tell the parent server administrator to delegate 7.8.1.in-addr.arpa to 
+the server a.ns.7.8.1.in-addr.arpa on IP address 1.8.7.200 and the server 
+b.ns.7.8.1.in-addr.arpa on IP address 1.8.7.201. Fees for this delegation are 
+typically included in the fees for allocating the IP addresses in the first 
+place. 
+
+Unfortunately, some parent administrators impose extra restrictions that prevent 
+the normal procedure from working. In particular, ARIN (IP addresses in America) 
+and RIPE (IP addresses in Europe) both insist that all their delegations be 
+glueless. This means that the DNS servers need names outside in-addr.arpa. 
+Gluelessness is bad practice, because it slows down DNS lookups and sometimes 
+destroys DNS lookups, but ARIN and RIPE don't care. (Reported May 2001.) 
+
+To deal with ARIN and RIPE, edit /service/tinydns/root/data manually to specify 
+server names in some other domain that you control, let's say x.org: 
+
+     .7.8.1.in-addr.arpa:1.8.7.200:a.reversens.x.org
+     .7.8.1.in-addr.arpa:1.8.7.201:b.reversens.x.org
+Then tell the parent server administrator to delegate 7.8.1.in-addr.arpa to the 
+server a.reversens.x.org on IP address 1.8.7.200 and the server 
+b.reversens.x.org on IP address 1.8.7.201. 
+
+APNIC (IP addresses in Asia and Australia) doesn't insist on glueless 
+delegations, but it does insist that you set up TCP service. (Reported June 
+2001.) 
+
+Reverse delegations for individual IP addresses 
+If you have are being given a block of fewer than 256 IP addresses, your parent 
+server should delegate each address to you separately. 
+
+For example, let's say you want your DNS servers on 1.8.7.200 and 1.8.7.201 to 
+publish computer names for the IP addresses 1.2.3.144 and 1.2.3.145. The 
+administrator of 3.2.1.in-addr.arpa should do 
+
+     cd /service/tinydns/root
+     ./add-childns 144.3.2.1.in-addr.arpa 1.8.7.200
+     ./add-childns 144.3.2.1.in-addr.arpa 1.8.7.201
+     ./add-childns 145.3.2.1.in-addr.arpa 1.8.7.200
+     ./add-childns 145.3.2.1.in-addr.arpa 1.8.7.201
+     make
+and you should do 
+
+     cd /service/tinydns/root
+     ./add-ns 144.3.2.1.in-addr.arpa 1.8.7.200
+     ./add-ns 144.3.2.1.in-addr.arpa 1.8.7.201
+     ./add-ns 145.3.2.1.in-addr.arpa 1.8.7.200
+     ./add-ns 145.3.2.1.in-addr.arpa 1.8.7.201
+     make
+to create the lines 
+
+     .144.3.2.1.in-addr.arpa:1.8.7.200:a
+     .144.3.2.1.in-addr.arpa:1.8.7.201:b
+     .145.3.2.1.in-addr.arpa:1.8.7.200:a
+     .145.3.2.1.in-addr.arpa:1.8.7.201:b
+in /service/tinydns/root/data. Then the line 
+
+     =phoenix.elysium.heaven.af.mil:1.2.3.144
+will declare that phoenix.elysium.heaven.af.mil has IP address 1.2.3.144 and 
+that the computer name for 1.2.3.144 is phoenix.elysium.heaven.af.mil. 
+
+Beware that some in-addr.arpa administrators instead do RFC 2317 ``classless'' 
+reverse delegation, sending your reverse domains through a single delegation: 
+
+     C144.3.2.1.in-addr.arpa:144.144-145.3.2.1.in-addr.arpa
+     C145.3.2.1.in-addr.arpa:145.144-145.3.2.1.in-addr.arpa
+     &144-145.3.2.1.in-addr.arpa:1.8.7.200:a
+     &144-145.3.2.1.in-addr.arpa:1.8.7.201:b
+     # or, in BIND master zone-file format:
+     # 144.3.2.1.in-addr.arpa. CNAME 144.144-145.3.2.1.in-addr.arpa.
+     # 145.3.2.1.in-addr.arpa. CNAME 145.144-145.3.2.1.in-addr.arpa.
+     # 144-145.3.2.1.in-addr.arpa. NS a.ns.144-145.3.2.1.in-addr.arpa.
+     # 144-145.3.2.1.in-addr.arpa. NS b.ns.144-145.3.2.1.in-addr.arpa.
+     # a.ns.144-145.3.2.1.in-addr.arpa. A 1.8.7.200
+     # b.ns.144-145.3.2.1.in-addr.arpa. A 1.8.7.201
+In this case your data file should contain lines such as 
+
+     .144-145.3.2.1.in-addr.arpa:1.8.7.200:a
+     .144-145.3.2.1.in-addr.arpa:1.8.7.201:b
+     =phoenix.elysium.heaven.af.mil:1.2.3.144
+     ^144.144-145.3.2.1.in-addr.arpa:phoenix.elysium.heaven.af.mil
+     =bogey.elysium.heaven.af.mil:1.2.3.145
+     ^145.144-145.3.2.1.in-addr.arpa:bogey.elysium.heaven.af.mil
+using the same name 144-145.3.2.1.in-addr.arpa selected by the parent 
+administrator. Normally ^ lines are unnecessary, because they are automatically 
+generated by = lines, but classless reverse delegation breaks this feature. 
+
+Why would anyone want to use classless reverse delegation? Answer: If you were 
+running BIND, you'd find it only a little bit painful to receive a classless 
+reverse delegation (setting up one zone file), while you'd find it much more 
+painful to receive separate reverse delegations (setting up many zone files). 
+EOT
+
+cat > /var/dns/tinydns/README.debug << EOT
+
+D. J. Bernstein 
+Internet publication 
+djbdns 
+
+Command-line tools to debug DNS configuration 
+The interfaces for these tools are subject to change. 
+
+     dnsqr t fqdn
+dnsqr asks for records of type t under the domain name fqdn. It prints the 
+results in a human-readable format, more compact than the dig output format. 
+
+t may be a name or number. Currently recognized names: any, a, ns, mx, ptr, txt, 
+cname, soa, hinfo, rp, sig, key, aaaa, axfr. Note that, if you want to perform a 
+zone transfer, you should use axfr-get, not dnsqr axfr. 
+
+dnsqr is available in djbdns 1.01 and above. 
+
+     dnsq t fqdn s
+dnsq sends a non-recursive DNS query to DNS server s for records of type t under 
+the domain name fqdn. It prints the results in a human-readable format. 
+
+     tinydns-get t fqdn
+     tinydns-get t fqdn ip
+tinydns-get is like dnsq, but obtains its results from data.cdb in the current 
+directory, in exactly the same way that tinydns and axfrdns obtain results from 
+data.cdb in their root directories. If ip is provided, it simulates the results 
+of a query from IP address ip; this matters if data.cdb differentiates among 
+clients in different locations. 
+
+     dnstrace t fqdn r
+dnstrace searches for all DNS servers that can affect the resolution of records 
+of type t under the domain name fqdn, starting from the root server r. You can 
+list more than one root server. 
+
+dnstrace uses the standard DNS resolution algorithm, but follows all possible 
+paths in the algorithm. It prints all responses it receives from DNS servers; it 
+also prints warnings about slow servers, dead servers, misdelegated (``lame'') 
+servers, and misformatted packets. dnstrace is similar in spirit to DOC and 
+dnswalk but is much more effective than those tools at debugging resolution 
+problems. 
+
+In versions 1.03 and above: You can pipe dnstrace through dnstracesort for 
+human-friendly output. dnstrace can take a long time to run, so standard 
+procedure is to save its output in a file: 
+
+     dnstrace any www.aol.com a.root-servers.net > AOL &
+Then you can run dnstracesort to see the results so far: 
+
+     dnstracesort < AOL | less
+The dnstracesort output uses ul codes for boldface and underline; these codes 
+are displayed properly by less. Sample results (converted to HTML): 
+
+     dnstrace a mail.lanset.com a.root-servers.net | dnstracesort | less
+	(note the bad ns2.lanset.com address from the roots)
+     dnstrace a www.nasa.gov a.root-servers.net | dnstracesort | less
+	(note the lame server)
+     dnstrace a www.netscape.com a.root-servers.net | dnstracesort | less
+     dnstrace a www.aol.com a.root-servers.net | dnstracesort | less
+     dnstrace a www.aol.com `cat /etc/dnsroots.global` | dnstracesort | less
+
+Beware that, as of January 2001, dnstrace produces more than 5 megabytes of 
+output for the complete trace of cr.yp.to starting from all the root servers. It 
+ends up sending more than 6000 queries to more than 200 different servers. 
+EOT
+
+cat > /var/dns/dnscache/README.dnscache << EOT
+
+D. J. Bernstein 
+Internet publication 
+djbdns 
+
+The dnscache program 
+dnscache is a DNS cache. It accepts recursive DNS queries from local clients 
+such as web browsers and mail transfer agents. It collects responses from remote 
+DNS servers. It caches the responses to save time later. 
+
+This is a reference page. For tutorial information, see the instructions for 
+workstations, home computers, external caches, or upgrading from BIND. 
+
+Configuration 
+Normally dnscache is set up by the dnscache-conf program. 
+
+dnscache runs chrooted in the directory specified by the $ROOT environment 
+variable, under the uid and gid specified by the $UID and $GID environment 
+variables. 
+
+dnscache listens for incoming UDP packets and TCP connections addressed to port 
+53 of $IP. Typically $IP is 127.0.0.1, but it can also be an externally 
+accessible IP address. dnscache accepts a packet or connection from IP address 
+1.2.3.4 if it sees a file named ip/1.2.3.4 or ip/1.2.3 or ip/1.2 or ip/1. 
+
+dnscache sends outgoing packets from high ports of $IPSEND. Typically $IPSEND is 
+0.0.0.0, meaning the machine's primary IP address. 
+
+dnscache reads a seed, up to 128 bytes, from standard input, and passes the seed 
+to dns_random_init. 
+
+dnscache reads a list of dotted-decimal root server IP addresses, one address 
+per line, from servers/@. It also scans the servers directory for server IP 
+addresses for other domains. If there are addresses listed in servers/moon.af.mil, 
+for example, then dnscache will send queries for anything.moon.af.mil to those 
+addresses, and will not cache records for anything.moon.af.mil from outside 
+servers such as the root servers. 
+
+Versions 1.03 and above: If $FORWARDONLY is set, dnscache treats servers/@ as a 
+list of IP addresses for other caches, not root servers. It forwards queries to 
+those caches the same way that a client does, rather than contacting a chain of 
+servers according to NS records. 
+
+Memory use 
+dnscache uses a fixed-size table, under 256K, to keep track of as many as 200 
+simultaneous UDP queries and 20 simultaneous TCP connections. It also 
+dynamically allocates memory, usually just a few bytes but occasionally much 
+more, for each active query. If it runs out of memory handling a query, it 
+discards that query. 
+
+dnscache asks the operating system to reserve a 128K buffer for bursts of 
+incoming UDP queries. In versions 1.03 and above, if a new UDP query arrives 
+when dnscache is already handling 200 simultaneous UDP queries, dnscache drops 
+the oldest query. If a new TCP connection arrives when dnscache is already 
+handling 20 simultaneous TCP connections, dnscache drops the oldest connection. 
+
+dnscache uses a fixed-size cache, as controlled by the $CACHESIZE environment 
+variable. Roughly 5% of the cache is used for a hash table. The rest is used for 
+cache entries (including 8-byte Y2038-compliant expiration times): 
+
+A sets. 22 bytes plus 4 bytes per address plus the length of the owner name. 
+
+NS sets or PTR sets or CNAME sets. 22 bytes plus the length of the owner name 
+and all the data names. 
+
+MX sets. 22 bytes plus 2 bytes per MX plus the length of all the names. 
+
+Other record sets. 22 bytes plus 2 bytes per record plus the length of all the 
+data strings plus the length of the owner name. 
+
+Nonexistent domain or server failure. 22 bytes plus the length of the owner 
+name. 
+Sets larger than 8192 bytes are not cached. 
+
+dnscache does not exit when it runs out of space in its cache; it simply removes 
+the oldest entries to make more space. 
+
+Resolution and caching policies 
+dnscache relies on a configured list of root name servers. In contrast, BIND 
+starts from a ``hint file'' listing name servers, and asks those name servers 
+where the root name servers are. 
+
+dnscache does not cache (or pass along) records outside the server's bailiwick; 
+those records could be poisoned. Records for foo.dom, for example, are accepted 
+only from the root servers, the dom servers, and the foo.dom servers. 
+
+dnscache does not bypass its cache to obtain glue from the additional section of 
+a response. In particular, it will not use glue outside the server's bailiwick, 
+or glue with TTL 0, or glue that violates other caching policies. 
+
+dnscache caches records for at most a week. It interprets TTLs above 2147483647 
+as 0. 
+
+dnscache does not cache SOA records. However, it does use SOA TTLs to determine 
+cache times (up to an hour) for zero-record responses and nonexistent domains. 
+
+Responses to DNS clients 
+dnscache's responses are generally much smaller than BIND's responses. They do 
+not include authority records (NS records of the source name servers and SOA 
+records for negative answers) or additional records (A records relevant to NS or 
+MX records). When the answer section is truncated by UDP length limits, it is 
+eliminated entirely. 
+
+dnscache tries to prevent local users from snooping on other local users. It 
+discards non-recursive queries; it discards inverse queries; and it discards 
+zone-transfer requests. If $HIDETTL is set, dnscache always uses a TTL of 0 in 
+its responses. In versions before 1.03, dnscache always uses a TTL of 0 in its 
+responses. 
+
+According to RFC 1035, the AA bit ``specifies that the responding name server is 
+an authority for the domain name in question section.'' dnscache is not an 
+authority for any domain names. dnscache never sets the AA bit (except in 
+NXDOMAIN responses, as required by RFC 2308, to work around a common client 
+bug). In contrast, BIND often sets AA for positive responses even when it is not 
+an authority for the domain name. (This appears to have been fixed in BIND 9.) 
+
+Repeated IP addresses 
+If a server sends dnscache a repeated IP address, dnscache passes the repeated 
+IP address along to the client. The server's behavior violates RFC 2181, section 
+5.5, but there are reasonable uses of repeated IP addresses for load balancing, 
+so dnscache does not go out of its way to remove repetitions when they occur. 
+
+A widespread BIND server bug (apparently fixed in BIND 9.1) can unintentionally 
+produce repeated IP addresses. Here is an example from one of the BIND company's 
+servers (now fixed): 
+
+     % dnsq a ns-ext.vix.com ns-ext.vix.com
+     1 ns-ext.vix.com:
+     117 bytes, 1+1+2+2 records, response, authoritative, noerror
+     query: 1 ns-ext.vix.com
+     answer: ns-ext.vix.com 3600 A 204.152.184.64
+     authority: vix.com 3600 NS ns-ext.vix.com
+     authority: vix.com 3600 NS ns1.gnac.com
+     additional: ns-ext.vix.com 3600 A 204.152.184.64
+     additional: ns1.gnac.com 130768 A 209.182.195.77
+This BIND bug is the most common reason for users to see repeated IP addresses 
+from dnscache. 
+
+Special names 
+dnscache handles localhost internally, giving it an A record of 127.0.0.1. 
+
+dnscache handles 1.0.0.127.in-addr.arpa internally, giving it a PTR record of 
+localhost. 
+
+dnscache handles dotted-decimal domain names internally, giving (e.g.) the 
+domain name 192.48.96.2 an A record of 192.48.96.2. 
+EOT
+
+cat > /var/dns/tinydns/README.run-server << EOT
+
+D. J. Bernstein 
+Internet publication 
+djbdns 
+
+How to run a DNS server 
+Here is how to set up your computer so that it publishes your IP addresses. If 
+you're upgrading from a BIND DNS server, you should follow the upgrade 
+instructions instead. 
+
+These instructions assume that you have already installed daemontools and 
+djbdns, and that svscan is already running. 
+
+1. As root, create UNIX accounts named Gtinydns and Gdnslog. 
+
+2. As root, create an /etc/tinydns service directory configured with the IP 
+address of the DNS server: 
+
+     tinydns-conf Gtinydns Gdnslog /etc/tinydns 1.8.7.200
+This directory contains logs and configuration files that you will change later. 
+
+The IP address must be configured on this computer. The IP address must not have 
+a DNS cache or any other port-53 service. One computer can run a DNS server 
+alongside a DNS cache as long as they are on separate IP addresses. The standard 
+setup for small networks is to put a DNS cache on a private address such as 
+127.0.0.1 or 10.53.0.1, and a DNS server on a public address. 
+
+3. As root, tell svscan about the new service, and use svstat to check that the 
+service is up: 
+
+     ln -s /etc/tinydns /service
+     sleep 5
+     svstat /service/tinydns
+
+4. Set up your desired DNS data, as described below. 
+
+5. Set up a public web page saying that your DNS server is powered by djbdns, so 
+that a Google search for powered djbdns will find your page in a few months. 
+These public statements will encourage other people to deploy djbdns, provide 
+djbdns support services, and develop djbdns-related tools. Please also consider 
+making a donation to the Bernstein Writing Fund. 
+
+Replicating your DNS service 
+Here is how to set up a second computer as a DNS server providing the same 
+information as your first DNS server. DNS caches around the Internet will try 
+both servers (in a random order), so they will receive answers even if one 
+server crashes. 
+
+You don't have to set up two DNS servers. Your DNS servers don't have to be more 
+highly replicated than your web servers, mail servers, etc. As an extreme, if 
+you have just one computer for your web server, mail server, and DNS server, 
+then setting up a second DNS server is silly. (Third-party DNS servers are 
+almost always a bad idea.) However, if you're running a large site with many 
+services, you should set up two DNS servers. 
+
+For concreteness, these instructions assume that your first DNS server is on IP 
+address 1.8.7.200, and that the second computer has IP address 1.8.7.201. 
+
+1. On the second computer, as root, create UNIX accounts named Gtinydns and 
+Gdnslog. 
+
+2. On the second computer, as root, create an /etc/tinydns service directory 
+configured with the second IP address: 
+
+     tinydns-conf Gtinydns Gdnslog /etc/tinydns 1.8.7.201
+
+3. On the first computer, as root, edit /service/tinydns/root/Makefile to 
+replicate /service/tinydns/root/data from the first computer to the second: 
+
+     remote: data.cdb
+             rsync -az -e ssh data.cdb 1.8.7.201:/service/tinydns/root/data.cdb
+
+     data.cdb: data
+             /usr/bin/tinydns-data
+Alternatively, if you don't have rsync: 
+
+     remote: data.cdb
+             scp data.cdb 1.8.7.201:/service/tinydns/root/data.cdb.tmp
+             ssh 1.8.7.201 mv /service/tinydns/root/data.cdb.tmp \
+             /service/tinydns/root/data.cdb
+
+     data.cdb: data
+             /usr/bin/tinydns-data
+Now any changes made on the first computer will be copied to the second. 
+
+4. On the second computer, as root, edit /service/tinydns/root/data to remind 
+yourself that DNS data is replicated from the first computer to the second: 
+
+     # Do not edit data on this computer! data.cdb is copied from 1.8.7.200.
+     # The following line protects data.cdb by stopping make.
+     9
+
+5. On the second computer, as root, tell svscan about the new service, and use 
+svstat to check that the service is up: 
+
+     ln -s /etc/tinydns /service
+     sleep 5
+     svstat /service/tinydns
+
+Receiving delegations 
+There are two crucial steps in arranging for a name to be delegated to and 
+handled by your DNS servers. There are separate web pages explaining the two 
+steps of this process in more detail for .com and .net and .org, .at, .br, .ch, 
+.de, .dk, .fr, .hu, .it, .nl, .no, .ru, .us, .in-addr.arpa, and local names. 
+Other top-level domains include .aero, .biz, .coop, .edu, .gov, .info, .int, 
+.mil, .museum, and .name. 
+
+First, your server needs to accept the delegation. Your server will not answer 
+questions about a name unless it knows that it is in charge of that name. The 
+following commands tell the server that it is in charge of all names ending with 
+heaven.af.mil and 7.8.1.in-addr.arpa: 
+
+     cd /service/tinydns/root
+     ./add-ns heaven.af.mil 1.8.7.200
+     ./add-ns heaven.af.mil 1.8.7.201
+     ./add-ns 7.8.1.in-addr.arpa 1.8.7.200
+     ./add-ns 7.8.1.in-addr.arpa 1.8.7.201
+     make
+These commands also tell the server 
+
+to advertise a.ns.heaven.af.mil with IP address 1.8.7.200 and b.ns.heaven.af.mil 
+with IP address 1.8.7.201 as the heaven.af.mil DNS servers, and 
+
+to advertise a.ns.7.8.1.in-addr.arpa with IP address 1.8.7.200 and 
+b.ns.7.8.1.in-addr.arpa with IP address 1.8.7.201 as the 7.8.1.in-addr.arpa DNS 
+servers. 
+
+Second, the parent server needs to delegate the name to your servers. Caches 
+around the Internet will not ask your server about a name unless that name has 
+been delegated to your servers. In the above example, 
+
+the administrator of af.mil needs to delegate heaven.af.mil to the server 
+a.ns.heaven.af.mil running on IP address 1.8.7.200 and the server 
+b.ns.heaven.af.mil running on IP address 1.8.7.201, and 
+
+the administrator of 8.1.in-addr.arpa needs to delegate 7.8.1.in-addr.arpa to 
+the server a.ns.7.8.1.in-addr.arpa running on IP address 1.8.7.200 and the 
+server b.ns.7.8.1.in-addr.arpa running on IP address 1.8.7.201. 
+
+To avoid triggering a BIND bug, the parent server must use the a.ns and b.ns 
+names, not alternate names with the same IP addresses. You can tell tinydns to 
+use different names; in that case, the parent server will have to use those 
+names. 
+
+Publishing addresses of your computers 
+Once a name such as heaven.af.mil has been delegated to your servers, you can 
+publish an IP address for heaven.af.mil and for any name ending with 
+.heaven.af.mil. 
+
+Common practice is to set up two types of names: 
+
+Computer names. Choose a name for each computer, and run add-host with the 
+computer's name and IP address. You also have to tell the computer to respond to 
+that IP address. 
+
+Service names. For each service (www, pop, etc.), run add-alias with the 
+service's name and IP address. 
+Distinguishing computer names from service names is helpful if you decide later 
+to move a service from one computer to another. 
+
+For example, let's say you're the heaven.af.mil administrator; you have three 
+computers, with IP addresses 1.8.7.4, 1.8.7.5, and 1.8.7.6; you have a web 
+server running on the first computer; and you have an FTP server running on the 
+first computer. You could name the computers lion, tiger, and bear, and run the 
+following commands: 
+
+     cd /service/tinydns/root
+     ./add-host lion.heaven.af.mil 1.8.7.4
+     ./add-host tiger.heaven.af.mil 1.8.7.5
+     ./add-host bear.heaven.af.mil 1.8.7.6
+     ./add-alias www.heaven.af.mil 1.8.7.4
+     ./add-alias ftp.heaven.af.mil 1.8.7.4
+     make
+The add-host and add-alias programs edit the file /service/tinydns/root/data, 
+which is in tinydns-data format. make runs the tinydns-data program to tell 
+tinydns about the new information. If anything goes wrong, tinydns-data prints 
+an error message, and tinydns continues providing the old information. 
+
+Now anyone around the Internet looking up lion.heaven.af.mil or 
+www.heaven.af.mil or ftp.heaven.af.mil will see IP address 1.8.7.4. Anyone 
+looking up the computer name for 1.8.7.4 will see lion.heaven.af.mil. 
+
+As an alternative to add-host and add-alias, you can edit /service/tinydns/root/data 
+manually, adding the following lines: 
+
+     =lion.heaven.af.mil:1.8.7.4
+     =tiger.heaven.af.mil:1.8.7.5
+     =bear.heaven.af.mil:1.8.7.6
+     +www.heaven.af.mil:1.8.7.4
+     +ftp.heaven.af.mil:1.8.7.4
+There are two reasons to use the add-host and add-alias programs instead of 
+editing data manually. First, add-host will prevent you from accidentally 
+reusing a previous computer name, or reusing a previous computer IP address. 
+Second, if you want to protect data against a sudden power outage, you have to 
+copy it to data.tmp, edit data.tmp, sync data.tmp to disk, and use mv to rename 
+data.tmp as data; add-host and add-alias do all this automatically. 
+
+More on choosing names. You should end up running add-host exactly once for each 
+IP address, giving a different computer name to each IP address. You should not 
+run add-alias for a computer name; there should be exactly one IP address for 
+the computer name. 
+
+Here are some good sources of computer names: 
+
+Animals: lion, tiger, bear, etc. But don't use these if you're a biologist 
+studying animals! Computer names should be words that you don't normally use in 
+other contexts. 
+
+Planets: mercury, venus, mars, etc. But don't use these if you're an astronomer! 
+
+Deities: zeus, athena, hermes, etc. 
+
+Elements: hydrogen, helium, lithium, etc. 
+
+Flowers: tulip, rose, lilac, etc. 
+
+If you add a second IP address to a computer, it's generally a good idea to use 
+add-host with a new name, as if the second IP address were actually on a 
+separate computer: 
+
+     ./add-host zebra.heaven.af.mil 1.8.7.240
+Then you won't have to change anything if that IP address is, in fact, moved to 
+a separate computer. 
+
+Checking addresses of your computers 
+Here is how to systematically verify that tinydns is publishing the right IP 
+address for a name: for example, that it is publishing IP address 1.8.7.4 for 
+www.heaven.af.mil. 
+
+First, check that the address is in /service/tinydns/root/data in tinydns-data 
+format: 
+
+     +www.heaven.af.mil:1.8.7.4
+IP addresses can be assigned by + lines, = lines, @ lines, . lines, and & lines. 
+
+Second, use tinydns-get to check that the address is in /service/tinydns/root/data.cdb: 
+
+     cd /service/tinydns/root
+     tinydns-get a www.heaven.af.mil
+The output will have a line saying 
+
+     answer: www.heaven.af.mil 86400 A 1.8.7.4
+although perhaps with a number other than 86400. Common reasons that this answer 
+is missing or obsolete: you didn't run make after changing data; you don't have 
+. lines (or Z lines) in data specifying relevant name servers. 
+
+If you want to check reverse lookups, replace a www.heaven.af.mil with ptr 
+4.7.8.1.in-addr.arpa. 
+
+Third, check that the IP address of tinydns is one of this computer's addresses: 
+
+     cat /service/tinydns/env/IP
+     netstat -n -i
+
+Fourth, check that the tinydns service is up: 
+
+     svstat /service/tinydns
+If tinydns-get reported more than 512 bytes, you also need TCP service; check 
+that the axfrdns service is up. 
+
+Fifth, ask tinydns about the name: 
+
+     dnsq a www.heaven.af.mil 1.8.7.200
+     dnsq a www.heaven.af.mil 1.8.7.201
+Here 1.8.7.200 and 1.8.7.201 are the IP addresses of your DNS servers. The 
+output of dnsq should be identical to the previous output of tinydns-get. 
+
+Sixth, ask your DNS cache for the address: 
+
+     dnsqr a www.heaven.af.mil
+If dnscache can't find the address, the problem is almost certainly that the 
+parent servers haven't delegated the relevant domains to your tinydns. Read the 
+log in /service/dnscache/log/main/current to see which servers dnscache is 
+contacting and what information they are providing. For a thorough debugging 
+scan, use dnstrace. 
+
+Do not use nslookup to test your DNS servers. 
+
+Publishing mail server addresses 
+When an Internet mail transfer agent wants to deliver mail addressed to 
+heaven.af.mil, it looks up the IP address of heaven.af.mil, and tries to connect 
+to an SMTP server at that IP address. You can use add-mx to specify a different 
+IP address: 
+
+     cd /service/tinydns/root
+     ./add-mx heaven.af.mil 1.8.7.193
+     make
+(mx stands for ``mail exchanger.'') As an alternative to add-mx, you can edit 
+data manually, adding the following line: 
+
+     @heaven.af.mil:1.8.7.193:a
+If you add several mail servers for heaven.af.mil, use a for the first, b for 
+the second, etc. add-mx handles this automatically. 
+
+Delegating names to another server 
+To delegate a name to a child server, run add-childns with the name being 
+delegated and the IP address of the child server: 
+
+     cd /service/tinydns/root
+     ./add-childns elysium.heaven.af.mil 1.2.3.144
+     make
+As an alternative to add-childns, you can edit data manually, adding the 
+following line: 
+
+     &elysium.heaven.af.mil:1.2.3.144:a
+If you delegate heaven.af.mil to several IP addresses, use a for the first, b 
+for the second, etc. add-childns handles this automatically. 
+
+You can select a server name other than the default a.ns.elysium.heaven.af.mil. 
+To avoid triggering a BIND bug, the parent server and the child server must use 
+the same name for the child server. For example, if the child server is using 
+
+     .elysium.heaven.af.mil:1.2.3.144:dns1.elysium.heaven.af.mil
+then the parent server must use the same name: 
+
+     &elysium.heaven.af.mil:1.2.3.144:dns1.elysium.heaven.af.mil
+Omit the IP address if the name already has an IP address assigned in another 
+data line: 
+
+     &elysium.heaven.af.mil::dns1.elysium.heaven.af.mil
+
+Setting up independent DNS servers 
+You can run several servers (on different IP addresses) with different data 
+files. For example, you could set up four servers, with two servers publishing 
+heaven.af.mil information, and two servers publishing panic.mil information. 
+Changes to heaven.af.mil would be made on the first server and copied to the 
+second. Changes to panic.mil would be made on the third server and copied to the 
+fourth. 
+
+Of course, a single server can publish both heaven.af.mil and panic.mil. 
+However, if you have a gigabyte of DNS data, you should consider running several 
+independent servers, each with a fraction of the data. 
+
+Moving a zone to an independent DNS server 
+Here is how to move heaven.af.mil from two DNS servers on IP addresses 1.8.7.200 
+and 1.8.7.201 to two independent DNS servers on IP addresses 1.8.11.50 and 
+1.8.11.51. 
+
+1. Copy all the heaven.af.mil data from the old servers to the new servers. 
+
+2. On the new servers, change the IP address of a.ns.heaven.af.mil from 
+1.8.7.200 to 1.8.11.50, by changing 
+
+     .heaven.af.mil:1.8.7.200:a
+to 
+
+     .heaven.af.mil:1.8.11.50:a
+in /service/tinydns/root/data. Similarly, change the IP address of 
+b.ns.heaven.af.mil from 1.8.7.201 to 1.8.11.51. Type 
+
+     make
+so that the new servers start publishing the new IP addresses. 
+
+3. Make the same changes on the parent servers. 
+
+4. Make the same changes on the old servers. This is important because caches 
+can continue talking to the old servers for any length of time; caches are under 
+no obligation to double-check with the parent servers. 
+
+5. Wait a few days for caches to stop contacting the old servers. If you make 
+any changes to the heaven.af.mil data during this time, make the same changes on 
+the old servers. 
+
+6. Remove the heaven.af.mil data from the old servers. That's it. 
+EOT
+
+cat > /var/dns/tinydns/README.tinydns-data << EOT
+
+D. J. Bernstein 
+Internet publication 
+djbdns 
+
+The tinydns-data program 
+This is a reference page. For tutorial information, see the instructions for 
+running a DNS server. 
+
+tinydns-data reads local DNS information from a file named data in the current 
+directory. It creates data.cdb in a binary format designed for fast access by 
+tinydns. It may also create some other files with names beginning with data. 
+
+tinydns-data updates data.cdb atomically, so you can use it safely while tinydns 
+is running. If anything goes wrong with the creation of data.cdb, tinydns-data 
+stops and leaves the old data.cdb in place. 
+
+Data format 
+The DNS information in data is a series of lines. There are several types of 
+lines, as shown below. 
+
+Each line starts with a special character and continues with a series of colon-separated 
+fields. In some cases the fields may be omitted; however, all colons must be 
+included except at the end of the line. Spaces and tabs at the end of a line are 
+ignored. 
+
+Each line contains a ttl (``time to live'') specifying the number of seconds 
+that the line's DNS records may be cached. Beware that cache times below 300 
+seconds will be treated as 300 by some clients, and NS cache times below 2 
+seconds can cause lookup failures. You may omit ttl; tinydns-data will use 
+default cache times, carefully selected to work well in normal situations. 
+
+You may include a timestamp on each line. If ttl is nonzero (or omitted), the 
+timestamp is a starting time for the information in the line; the line will be 
+ignored before that time. If ttl is zero, the timestamp is an ending time 
+(``time to die'') for the information in the line; tinydns dynamically adjusts 
+ttl so that the line's DNS records are not cached for more than a few seconds 
+past the ending time. A timestamp is an external TAI64 timestamp, printed as 16 
+lowercase hexadecimal characters. For example, the lines 
+
+     +www.heaven.af.mil:1.2.3.4:0:4000000038af1379
+     +www.heaven.af.mil:1.2.3.7::4000000038af1379
+specify that www.heaven.af.mil will have address 1.2.3.4 until time 
+4000000038af1379 (2000-02-19 22:04:31 UTC) and will then switch to IP address 
+1.2.3.7. 
+
+For versions 1.04 and above: You may include a client location on each line. The 
+line is ignored for clients outside that location. Client locations are 
+specified by % lines: 
+
+     %lo:ipprefix
+means that IP addresses starting with ipprefix are in location lo. lo is a 
+sequence of one or two ASCII letters. A client is in only one location; longer 
+prefixes override shorter prefixes. For example, 
+
+     %in:192.168
+     %ex
+     +jupiter.heaven.af.mil:192.168.1.2:::in
+     +jupiter.heaven.af.mil:1.2.3.4:::ex
+specifies that jupiter.heaven.af.mil has address 192.168.1.2 for clients in the 
+192.168.* network and address 1.2.3.4 for everyone else. 
+
+Common data lines 
+
+     .fqdn:ip:x:ttl:timestamp:lo
+Name server for our domain fqdn. tinydns-data creates 
+
+an NS (``name server'') record showing x.ns.fqdn as a name server for fqdn; 
+
+an A (``address'') record showing ip as the IP address of x.ns.fqdn; and 
+
+an SOA (``start of authority'') record for fqdn listing x.ns.fqdn as the primary 
+name server and hostmaster@fqdn as the contact address. 
+You may have several name servers for one domain, with a different x for each 
+server. tinydns will return only one SOA record per domain. 
+
+If x contains a dot then tinydns-data will use x as the server name rather than 
+x.ns.fqdn. This feature is provided only for compatibility reasons; names not 
+ending with fqdn will force clients to contact parent servers much more often 
+than they otherwise would, and will reduce the overall reliability of DNS. You 
+should omit ip if x has IP addresses assigned elsewhere in data; in this case, 
+tinydns-data will omit the A record. 
+
+Examples: 
+
+     .panic.mil:1.8.7.55:a
+creates an NS record showing a.ns.panic.mil as a name server for panic.mil, an A 
+record showing 1.8.7.55 as the IP address of a.ns.panic.mil, and an SOA record 
+for panic.mil. 
+
+     .panic.mil:1.8.7.56:dns2.panic.mil
+creates an NS record showing dns2.panic.mil as a name server for panic.mil, an A 
+record showing 1.8.7.56 as the IP address of dns2.panic.mil, and an SOA record 
+for panic.mil. 
+
+     .panic.mil::a.ns.heaven.af.mil
+creates an NS record showing a.ns.heaven.af.mil as a name server for panic.mil, 
+and an SOA record for panic.mil. 
+
+     &fqdn:ip:x:ttl:timestamp:lo
+Name server for domain fqdn. tinydns-data creates 
+
+an NS record showing x.ns.fqdn as a name server for fqdn and 
+
+an A record showing ip as the IP address of x.ns.fqdn. 
+
+If x contains a dot then it is treated specially; see above. 
+
+You may have several name servers for one domain, with a different x for each 
+server. 
+
+Normally & is used for domains delegated by this server to child servers, while 
+. is used for domains delegated to this server. 
+
+Examples: 
+
+     &serious.panic.mil:1.8.248.6:a
+creates an NS record showing a.ns.serious.panic.mil as a name server for 
+serious.panic.mil, and an A record showing 1.8.248.6 as the IP address of 
+a.ns.serious.panic.mil. 
+
+     &serious.panic.mil:1.8.248.7:ns7.panic.mil
+creates an NS record showing ns7.panic.mil as a name server for 
+serious.panic.mil, and an A record showing 1.8.248.7 as the IP address of 
+ns7.panic.mil. 
+
+     =fqdn:ip:ttl:timestamp:lo
+Host fqdn with IP address ip. tinydns-data creates 
+
+an A record showing ip as the IP address of fqdn and 
+
+a PTR (``pointer'') record showing fqdn as the name of d.c.b.a.in-addr.arpa if 
+ip is a.b.c.d. 
+
+Remember to specify name servers for some suffix of fqdn; otherwise tinydns will 
+not respond to queries about fqdn. The same comment applies to other records 
+described below. Similarly, remember to specify name servers for some suffix of 
+d.c.b.a.in-addr.arpa, if that domain has been delegated to you. 
+
+Example: 
+
+     =button.panic.mil:1.8.7.108
+creates an A record showing 1.8.7.108 as the IP address of button.panic.mil, and 
+a PTR record showing button.panic.mil as the name of 108.7.8.1.in-addr.arpa. 
+
+     +fqdn:ip:ttl:timestamp:lo
+Alias fqdn with IP address ip. This is just like =fqdn:ip:ttl except that 
+tinydns-data does not create the PTR record. 
+
+For versions 1.04 and above: tinydns returns addresses (from + or = or @ or . or 
+& lines) in a random order in the answer section. If there are more than 8 
+records, it returns a random set of 8. 
+
+Example: 
+
+     +button.panic.mil:1.8.7.109
+creates an A record showing 1.8.7.109 as another IP address for button.panic.mil. 
+
+     @fqdn:ip:x:dist:ttl:timestamp:lo
+Mail exchanger for fqdn. tinydns-data creates 
+
+an MX (``mail exchanger'') record showing x.mx.fqdn as a mail exchanger for fqdn 
+at distance dist and 
+
+an A record showing ip as the IP address of x.mx.fqdn. 
+You may omit dist; the default distance is 0. 
+
+If x contains a dot then it is treated specially; see above. 
+
+You may create several MX records for fqdn, with a different x for each server. 
+Make sure to arrange for the SMTP server on each IP address to accept mail for 
+fqdn. 
+
+Example: 
+
+     @panic.mil:1.8.7.88:mail.panic.mil
+creates an MX record showing mail.panic.mil as a mail exchanger for panic.mil at 
+distance 0, and an A record showing 1.8.7.88 as the IP address of mail.panic.mil. 
+
+     #comment
+Comment line. The line is ignored. 
+
+Uncommon data lines 
+
+     -fqdn:ip:ttl:timestamp:lo
+For versions 1.04 and above: This type of line is used by programs that 
+automatically edit + lines in data to temporarily exclude addresses of 
+overloaded or dead machines. The line is ignored. 
+
+     'fqdn:s:ttl:timestamp:lo
+TXT (``text'') record for fqdn. tinydns-data creates a TXT record for fqdn 
+containing the string s. You may use octal \nnn codes to include arbitrary bytes 
+inside s; for example, \072 is a colon. 
+
+     ^fqdn:p:ttl:timestamp:lo
+PTR record for fqdn. tinydns-data creates a PTR record for fqdn pointing to the 
+domain name p. 
+
+     Cfqdn:p:ttl:timestamp:lo
+CNAME (``canonical name'') record for fqdn. tinydns-data creates a CNAME record 
+for fqdn pointing to the domain name p. 
+
+Don't use Cfqdn if there are any other records for fqdn. Don't use Cfqdn for 
+common aliases; use +fqdn instead. Remember the wise words of Inigo Montoya: 
+``You keep using CNAME records. I do not think they mean what you think they 
+mean.'' 
+
+     Zfqdn:mname:rname:ser:ref:ret:exp:min:ttl:timestamp:lo
+SOA record for fqdn showing mname as the primary name server, rname (with the 
+first . converted to @) as the contact address, ser as the serial number, ref as 
+the refresh time, ret as the retry time, exp as the expire time, and min as the 
+minimum time. ser, ref, ret, exp, and min may be omitted; they default to, 
+respectively, the modification time of the data file, 16384 seconds, 2048 
+seconds, 1048576 seconds, and 2560 seconds. 
+
+     :fqdn:n:rdata:ttl:timestamp:lo
+Generic record for fqdn. tinydns-data creates a record of type n for fqdn 
+showing rdata. n must be an integer between 1 and 65535; it must not be 2 (NS), 
+5 (CNAME), 6 (SOA), 12 (PTR), 15 (MX), or 252 (AXFR). The proper format of rdata 
+depends on n. You may use octal \nnn codes to include arbitrary bytes inside 
+rdata. 
+
+Wildcards 
+tinydns supports wildcards of the form *.fqdn. Information for *.fqdn is 
+provided for every name ending with .fqdn, except names that have their own 
+records and names that are covered by more specific wildcards. 
+
+For example, the lines 
+
+     +pink.floyd.u.heaven.af.mil:1.2.3.4
+     +*.u.heaven.af.mil:1.2.3.200
+have the same effect as 
+
+     +pink.floyd.u.heaven.af.mil:1.2.3.4
+     +joe.u.heaven.af.mil:1.2.3.200
+     +bill.u.heaven.af.mil:1.2.3.200
+     +floyd.u.heaven.af.mil:1.2.3.200
+     +ishtar.u.heaven.af.mil:1.2.3.200
+     +joe.bob.u.heaven.af.mil:1.2.3.200
+     +sally.floyd.u.heaven.af.mil:1.2.3.200
+     +post.pink.floyd.u.heaven.af.mil:1.2.3.200
+and so on. 
+
+As another example, the lines 
+
+     +pink.floyd.u.heaven.af.mil:1.2.3.4
+     @*.u.heaven.af.mil::mail.heaven.af.mil
+have the same effect as 
+
+     +pink.floyd.u.heaven.af.mil:1.2.3.4
+     @joe.u.heaven.af.mil::mail.heaven.af.mil
+     @bill.u.heaven.af.mil::mail.heaven.af.mil
+     @floyd.u.heaven.af.mil::mail.heaven.af.mil
+     @ishtar.u.heaven.af.mil::mail.heaven.af.mil
+     @joe.bob.u.heaven.af.mil::mail.heaven.af.mil
+     @sally.floyd.u.heaven.af.mil::mail.heaven.af.mil
+     @post.pink.floyd.u.heaven.af.mil::mail.heaven.af.mil
+and so on. Notice that the wildcard does not apply to pink.floyd.u.heaven.af.mil, 
+because that name has its own records. 
+
+A typical data file 
+
+     =lion.heaven.af.mil:1.2.3.4
+     @heaven.af.mil:1.2.3.4
+     @3.2.1.in-addr.arpa:1.2.3.4
+
+     =tiger.heaven.af.mil:1.2.3.5
+     .heaven.af.mil:1.2.3.5:a
+     .3.2.1.in-addr.arpa:1.2.3.5:a
+
+     =bear.heaven.af.mil:1.2.3.6
+     .heaven.af.mil:1.2.3.6:b
+     .3.2.1.in-addr.arpa:1.2.3.6:b
+
+     =cheetah.heaven.af.mil:1.2.3.248
+     =panther.heaven.af.mil:1.2.3.249
+Here is the same information in BIND zone-file format, with the two zones 
+merged: 
+
+     heaven.af.mil. 2560 IN SOA a.ns.heaven.af.mil. hostmaster.heaven.af.mil. ...
+     heaven.af.mil. 259200 IN NS a.ns.heaven.af.mil.
+     heaven.af.mil. 259200 IN NS b.ns.heaven.af.mil.
+     heaven.af.mil. 86400 IN MX mx.heaven.af.mil.
+
+     3.2.1.in-addr.arpa. 2560 IN SOA a.ns.3.2.1.in-addr.arpa. hostmaster.3.2.1.in-addr.arpa. ...
+     3.2.1.in-addr.arpa. 259200 IN NS a.ns.3.2.1.in-addr.arpa.
+     3.2.1.in-addr.arpa. 259200 IN NS b.ns.3.2.1.in-addr.arpa.
+     3.2.1.in-addr.arpa. 86400 IN MX mx.3.2.1.in-addr.arpa.
+
+     4.3.2.1.in-addr.arpa. 86400 IN PTR lion.heaven.af.mil.
+     lion.heaven.af.mil. 86400 IN A 1.2.3.4
+     mx.heaven.af.mil. 86400 IN A 1.2.3.4
+     mx.3.2.1.in-addr.arpa. 86400 IN A 1.2.3.4
+
+     5.3.2.1.in-addr.arpa. 86400 IN PTR tiger.heaven.af.mil.
+     tiger.heaven.af.mil. 86400 IN A 1.2.3.5
+     a.ns.heaven.af.mil. 259200 IN A 1.2.3.5
+     a.ns.3.2.1.in-addr.arpa. 259200 IN A 1.2.3.5
+
+     6.3.2.1.in-addr.arpa. 86400 IN PTR bear.heaven.af.mil.
+     bear.heaven.af.mil. 86400 IN A 1.2.3.6
+     b.ns.heaven.af.mil. 259200 IN A 1.2.3.6
+     b.ns.3.2.1.in-addr.arpa. 259200 IN A 1.2.3.6
+
+     248.3.2.1.in-addr.arpa. 86400 IN PTR cheetah.heaven.af.mil.
+     cheetah.heaven.af.mil. 86400 IN A 1.2.3.248
+
+     249.3.2.1.in-addr.arpa. 86400 IN PTR panther.heaven.af.mil.
+     panther.heaven.af.mil. 86400 IN A 1.2.3.249
+
+Design notes 
+The data format is very easy for programs to edit, and reasonably easy for 
+humans to edit, unlike the traditional zone-file format. 
+
+tinydns-data could support a name wherever an IP address is required; it would 
+look up the name in DNS and use the resulting address. This would reliably track 
+changes in offsite IP addresses if the database were rebuilt periodically. 
+EOT
+
+cat > /var/dns/tinydns/README.tinydns-notes << EOT
+
+D. J. Bernstein 
+Internet publication 
+djbdns 
+
+Notes on the Domain Name System 
+If you've seen my reference manuals on Internet mail, the Internet mail message 
+header format, SMTP, and FTP, then you might be expecting something similarly 
+comprehensive for DNS. This isn't it. Sorry. 
+
+Trusted servers 
+When a DNS cache---a ``full-service resolver'' under RFC 1123---wants the 
+address of www.w3.org, it may contact the w3.org DNS servers, the org DNS 
+servers, or the root DNS servers. 
+
+For example, as of January 2001, one of the w3.org DNS servers is 
+w3csun1.cis.rl.ac.uk. This server has the power to define the address of 
+www.w3.org. It can flood the other servers to prevent them from providing 
+contradictory information. 
+
+When the cache wants the address of w3csun1.cis.rl.ac.uk, it may contact the 
+rl.ac.uk DNS servers, the ac.uk DNS servers, the uk DNS servers, or the root DNS 
+servers. For example, ns.eu.net, one of the ac.uk DNS servers, has the power to 
+define the address of w3csun1.cis.rl.ac.uk. Consequently it also has the power 
+to define the address of www.w3.org. 
+
+Similarly, all names under eu.net, hence ac.uk and w3.org, are controlled by 
+sunic.sunet.se; all names under sunet.se, hence eu.net and ac.uk and w3.org, are 
+controlled by beer.pilsnet.sunet.se; and beer.pilsnet.sunet.se is running an 
+ancient version of BIND, known to allow anyone on the Internet to take over the 
+machine. 
+
+Are the www.w3.org administrators aware that their DNS service relies on 
+beer.pilsnet.sunet.se and 200 other obscure computers around the world? 
+
+In contrast, if w3.org had used in-bailiwick names for its servers, such as 
+a.ns.w3.org and b.ns.w3.org and c.ns.w3.org and d.ns.w3.org, then it would not 
+be relying on the servers for ac.uk and eu.net and sunet.se. 
+
+I pointed out this type of problem in January 2000. At that time, these same 200 
+computers had control over practically all names on the Internet, including 
+*.com. The .com server names were subsequently fixed to avoid the problem. Most 
+country-code TLDs have not been fixed. 
+
+Poison 
+RFC 1034's resolution algorithm allows any server on the Internet to destroy, or 
+take over, yahoo.com. All the nasty.dom server has to do is delegate 
+www.nasty.dom to the yahoo.com servers while providing false addresses for those 
+servers: 
+
+     www.nasty.dom NS ns1.yahoo.com
+     www.nasty.dom NS ns2.dca.yahoo.com
+     www.nasty.dom NS ns3.europe.yahoo.com
+     www.nasty.dom NS ns5.dcx.yahoo.com
+     ns1.yahoo.com A 1.2.3.4
+     ns2.dca.yahoo.com A 1.2.3.4
+     ns3.europe.yahoo.com A 1.2.3.4
+     ns5.dcx.yahoo.com A 1.2.3.4
+The nasty.dom server can now wait for (or encourage) the cache to ask about 
+www.nasty.dom. When the cache receives the answer, it will, according to RFC 
+1034, save the forged yahoo.com addresses for future reference. Subsequent 
+queries for yahoo.com will be misdirected. 
+
+Cache poisoning was widely known in 1990. But it was viewed as merely a 
+reliability issue, a result of sloppy administration. Someone who listed 
+munnari.oz.au as a backup server with an out-of-date IP address would 
+accidentally poison caches and destroy legitimate connections to munnari.oz.au. 
+
+Vixie's first BIND release, version 4.9 in 1992, featured a notion of 
+``credibility'' that managed to prevent the most severe cases of accidental 
+poisoning. From a security point of view, Vixie's ``credibility'' is garbage; it 
+doesn't even stop the yahoo.com attack described above. 
+
+It's obvious how to eliminate all poisoning. Caches must discard yahoo.com 
+information except from the yahoo.com servers, the com servers, and the root 
+servers. This stops malicious poisoning, so of course it stops accidental 
+poisoning too. End of problem. 
+
+BIND finally adopted this poison-elimination rule in 1997, after cache poisoning 
+became a popular attack tool. Did Vixie scrap his obsolete ``credibility'' 
+rules? No! As of January 2000, they were still in BIND 8.2.2-P5, more incoherent 
+than ever. For example, if records had ``additional section credibility,'' and 
+if someone sent a query asking for those records, BIND would reduce the TTL of 
+the records by 5%. Some of the other rules appear in RFC 2181. 
+
+I pointed out on bugtraq in January 2000 that, when a domain changed all its DNS 
+server names (e.g., to switch ISPs), an attacker could trivially exploit BIND's 
+``credibility'' rules to break access to that domain. I also tried to point this 
+out on namedroppers, but my message was censored by Randy Bush. 
+
+dnscache doesn't discriminate against additional records. Valid records are 
+accepted whether they're additional records in one packet or answer records in 
+the next; timing doesn't affect the semantics. 
+
+Limited parents 
+RFC 1034 assumes that parent servers will list all the NS records of child 
+servers. 
+
+In practice, however, some parents limit the number of NS records that they will 
+list; some parents have painful update procedures; and, for many years, the 
+largest .com registrar pointlessly refused NS records listing host names with IP 
+addresses that had already been registered under different host names. 
+
+So a child server often lists more NS records than its parent. It includes the 
+NS records along with its answers, so that caches will replace the NS records 
+from the parent with the NS records from the child. If the NS records (and 
+associated addresses) expire after the answers do, the caches will use the 
+complete NS list to find the new answers, and will obtain a fresh NS list at 
+that point. The load is spread among all the servers, though not as evenly as it 
+would be if the parent listed more servers. 
+
+Unfortunately, BIND 8.2 won't cache the fresh NS list. After the old list 
+expires, BIND contacts the parent servers and again obtains the incomplete NS 
+list. 
+
+Beware that, because of the ``credibility'' rules described above, the NS 
+records from the child servers must include the NS records from the parent. 
+Otherwise an attacker can break BIND's access to the child servers. 
+
+Gluelessness 
+Suppose you're a DNS cache, and you want the address of www.espn.tv. You happen 
+to know the address of a .tv DNS server, so you ask it for the address of 
+www.espn.tv. ``I don't know, but I know that .espn.tv has two DNS servers, ns-1.disney.corp 
+and ns-2.disney.corp,'' it says. ``Try asking them.'' 
+
+So you contact ns-1.disney.corp. But what's the address of ns-1.disney.corp? You 
+have to put the original question on hold while you search for the address of 
+ns-1.disney.corp. You happen to know an address of a .corp DNS server, so you 
+ask it for the address of ns-1.disney.corp. ``I don't know, but I know that 
+.disney.corp has two DNS servers, zone.espn.tv and night.espn.tv,'' it says. 
+``Try asking them.'' 
+
+Bottom line: You can't reach espn.tv, and you can't reach disney.corp. 
+
+If zone.espn.tv had been a DNS server for .espn.tv, the .tv server would have 
+provided glue for zone.espn.tv, i.e., the IP address of zone.espn.tv. So you 
+would have been able to contact zone.espn.tv. RFC 1034 specifically requires 
+glue for referrals to in-bailiwick DNS servers. (Some people use the word 
+``glue'' only in this case.) 
+
+For referrals to out-of-bailiwick DNS servers, however, RFC 1034 says that glue 
+is unnecessary. RFC 1537 says the same thing. RFC 1912 says the same thing. The 
+comp.protocols.tcp-ip.domains FAQ says that ``you do not need a glue record, 
+and, in fact, adding one is a very bad idea.'' (This is an obsolete reference to 
+accidental poisoning; see above.) Some DNS server implementations ignore out-of-bailiwick 
+glue by default. So the glueless domains espn.tv and disney.corp are following 
+the rules---yet neither of them is reachable. 
+
+There can be trouble even when there are no loops. Suppose a BIND cache is 
+looking up www.espn.tv in the following situation: 
+
+     espn.tv NS ns-1.disney.corp
+     espn.tv NS ns-2.disney.corp
+
+     disney.corp NS ns-1.disney.corp
+     disney.corp NS ns-2.disney.corp
+When BIND sees the glueless delegation to ns-1.disney.corp, it drops the 
+www.espn.tv query and begins a ``sysquery'' for ns-1.disney.corp, hoping to have 
+the ns-1.disney.corp address cached by the time the www.espn.tv query is 
+retried. (The BIND developers refer to this bug as ``no query restart.'') 
+Clients generally don't retry more than four times, so an initial query for a 
+domain with four levels of gluelessness will fail; an initial query for a domain 
+with three levels of gluelessness will be very likely to fail, and very slow if 
+it succeeds. 
+
+``As far as I know, the Internet has not yet lost any domains to gluelessness,'' 
+I wrote in 2000. ``But there are an increasing number of glueless domains, and 
+I've spotted a glueless domain with glueless DNS servers. How much gluelessness 
+must a cache tolerate? Currently dnscache allows three levels of gluelessness. 
+This seems to be enough for now, but will it be enough in the future?'' 
+
+I subsequently learned about www.monty.de, which had so many levels of 
+gluelessness that BIND caches were completely unable to reach it: 
+
+     monty.de NS ns.norplex.net
+     monty.de NS ns2.norplex.net
+
+     norplex.net NS vserver.neptun11.de
+     norplex.net NS ns1.mars11.de
+
+     neptun11.de NS ns.germany.net
+     neptun11.de NS ns2.germany.net
+
+     mars11.de NS ns1.neptun11.de
+     mars11.de NS www.gilching.de
+
+     gilching.de NS ecrc.de
+     gilching.de NS name.muenchen.roses.de
+dnscache was able to find the address of www.monty.de, but it needed fourteen 
+queries to various servers. 
+
+I recommend that all DNS servers be in-bailiwick servers with glue. External DNS 
+servers should be given internal names, with address records copied 
+automatically (preferably by some secure mechanism) from the external names to 
+the internal names. 
+
+DNS should have been designed with addresses, not names, in NS records and MX 
+records. The ``additional section'' of DNS responses should have been 
+eliminated. RFC 1035 observes correctly that NS indirection and MX indirection 
+``insure [sic] consistency'' of addresses; however, this indirection should have 
+been handled by the server, not the client. 
+
+I have a separate page discussing A6 and DNAME from this perspective. 
+
+Expiring glue 
+Occasionally the address records for some DNS servers all expire from a cache, 
+even though the servers weren't glueless in the first place: 
+
+     aol.com NS dns-01.ns.aol.com
+     aol.com NS dns-02.ns.aol.com
+Usually this means that the A records accompanied the NS records but with lower 
+TTLs, and the cache didn't contact the servers soon enough to refresh the A 
+records as described above. (If the cache is BIND 8.2, then the A records won't 
+be refreshed anyway, and an attacker can force the TTLs down even if they 
+originally matched.) 
+
+In this situation, the RFC 1034 resolution algorithm fails. According to RFC 
+1034, if the cache wants the address of yb.mx.aol.com, it looks for the ``best 
+servers'' among ``locally-available name server RRs,'' obtaining the names dns-01.ns.aol.com 
+and dns-02.ns.aol.com; it then starts ``parallel resolver processes looking for 
+the addresses'' of dns-01.ns.aol.com and dns-02.ns.aol.com; those resolver 
+processes look for the ``best servers,'' and so on. The cache loops until it 
+runs out of patience and gives up. 
+
+Fortunately, real caches use a different algorithm. dnscache starts from the 
+roots, ignoring cached NS records, when it reaches gluelessness level 2. BIND 
+reportedly starts all its glue requests from the roots. 
+
+Aliases 
+Say a cache is looking for information on www.espn.tv. If it encounters a CNAME 
+record for www.espn.tv pointing to www.espn.go.com, it is supposed to start over 
+again, looking for the same information on www.espn.go.com. www.espn.tv is an 
+alias for www.espn.go.com. 
+
+RFC 1034 says that an alias ``should'' not point to another alias. In reality, 
+however, if an administrator decides to set up www.espn.go.com as an alias for 
+espn.go.com, he probably won't remember to change www.espn.tv---but users will 
+kick and scream if www.espn.tv breaks. ``CNAME chains should be followed,'' RFC 
+1034 says. 
+
+Aliases, like gluelessness, force DNS clients to chew up time and memory. How 
+many layers of aliases must a cache tolerate? Currently dnscache allows four 
+levels of aliases. This seems to be enough for now, but will it be enough in the 
+future? 
+
+I recommend that all CNAME records be eliminated. DNS should have been designed 
+without aliases. 
+
+Classless in-addr.arpa delegations 
+Suppose an ISP has assigned IP addresses 1.2.3.100, 1.2.3.101, and 1.2.3.102 to 
+a customer, and the customer wants to handle reverse lookups for those 
+addresses. The ISP can simply delegate the three names 100.3.2.1.in-addr.arpa, 
+101.3.2.1.in-addr.arpa, and 102.3.2.1.in-addr.arpa to the customer's DNS server. 
+
+In practice, however, the ISP might instead use CNAME records. It makes 
+100.3.2.1.in-addr.arpa an alias for 100.cust37.3.2.1.in-addr.arpa, and similarly 
+for 101 and 102; and then it delegates cust37.3.2.1.in-addr.arpa to the 
+customer's DNS server. This is a valid configuration, although RFC 2317 says 
+that some old versions of BIND can't handle it. 
+
+Why would an ISP want to add this extra layer of complication? Answer: With the 
+simple approach, if the customer is running BIND, he'll have to put the 100 and 
+101 and 102 records in three separate files. With the complicated approach, the 
+customer can put the records into a single file. 
+
+I recommend that, in this situation, the CNAME records be eliminated, and the 
+customer upgrade to a better DNS server. 
+
+DNS server selection 
+Say a cache has a query to transmit to the .com servers. It has a list of 
+addresses of the .com servers. Which server does it contact first? 
+
+dnscache simply contacts a random server, to balance the load as effectively as 
+possible. BIND keeps track of the round-trip times for its queries to each 
+server, with various bonuses and penalties, and then sends all its queries to 
+the ``best'' server. 
+
+Simulations show that the increasingly frequent .com server overloads (as of 
+March 2000) could be caused by BIND's transmission strategy. 
+
+The five types of DNS responses 
+When a cache receives a normal DNS response, it learns exactly one of the 
+following five pieces of information: 
+
+``The query was not answered because the query name is an alias. I need to 
+change the query name and try again.'' This applies if the answer section of the 
+response contains a CNAME record for the query name and CNAME does not match the 
+query type. 
+
+``The query name has no records answering the query, and is also guaranteed to 
+have no records of any other type.'' This applies if the response code is 
+NXDOMAIN and #1 doesn't apply. The amount of time that this information can be 
+cached depends on the contents of the SOA record in the authority section of the 
+response, if there is one. 
+
+``The query name has one or more records answering the query.'' This applies if 
+the answer section of the response contains one or more records under the query 
+name matching the query type, and #1 doesn't apply, and #2 doesn't apply. 
+
+``The query was not answered because the server does not have the answer. I need 
+to contact other servers.'' This applies if the authority section of the 
+response contains NS records, and the authority section of the response does not 
+contain SOA records, and #1 doesn't apply, and #2 doesn't apply, and #3 doesn't 
+apply. The ``other servers'' are named in the NS records in the authority 
+section. 
+
+``The query name has no records answering the query, but it may have records of 
+another type.'' This applies if #1 doesn't apply, and #2 doesn't apply, and #3 
+doesn't apply, and #4 doesn't apply. The amount of time that this information 
+can be cached depends on the contents of the SOA record in the authority 
+section, if there is one. 
+
+This procedure requires an incredible amount of bug-prone parsing for a very 
+small amount of information. The underlying problem is that DNS was designed to 
+declare information in a human-oriented format, rather than to support crucial 
+operations in the simplest possible way. 
+
+Warning about NXDOMAIN: It is clear from RFC 1034 and RFC 1035 that an NXDOMAIN 
+guarantees the nonexistence of every subdomain of the query domain. For example, 
+if a cache sees an NXDOMAIN for ns.heaven.af.mil, it can conclude that 
+a.ns.heaven.af.mil and b.ns.heaven.af.mil don't exist. If a server has records 
+for a.ns.heaven.af.mil and b.ns.heaven.af.mil, but no records for 
+ns.heaven.af.mil. it sends a zero-records (#5) response, not an NXDOMAIN. 
+However, RFC 2308 allows NXDOMAIN even when the domain exists, to indicate that 
+there are no records of any type under the query name. So it is essential for 
+interoperability that caches not draw the above conclusion. 
+
+Truncation 
+DNS packets 512 bytes or smaller can be transmitted through UDP. DNS packets 
+65535 bytes or smaller can be transmitted through TCP. 
+
+DNS clients and DNS caches begin by transmitting a query (which always fits into 
+512 bytes) through UDP. The response is sent back through UDP. If the response 
+does not fit into a UDP packet, it is truncated, and the TC bit is set at the 
+beginning of the UDP packet. Clients and caches that support TCP see the TC bit 
+and retry their query through TCP. 
+
+RFC 1035 does not make clear exactly what ``truncated'' means. The obvious 
+interpretation is to end the packet at exactly 512 bytes. However, this causes 
+interoperability problems: in particular, the Squid cache dies if a packet is 
+truncated between records. BIND ends the packet before the first record that 
+went past 512 bytes. dnscache ends the packet before all records. 
+
+Compression 
+DNS packets use an ad-hoc compression method in which portions of domain names 
+can sometimes be replaced with two-byte pointers to previous domain names. The 
+precise rule is that a name can be compressed if it is a response owner name, 
+the name in NS data, the name in CNAME data, the name in PTR data, the name in 
+MX data, or one of the names in SOA data. 
+
+One problem with DNS compression is the amount of code required to parse it. 
+Reliably locating all these names takes quite a bit of work that would otherwise 
+have been unnecessary for a DNS cache. LZ77 compression would have been much 
+easier to implement. 
+
+Another problem with DNS compression is the amount of code required to correctly 
+generate it. (RFC 1035 allowed servers to not bother compressing their 
+responses; however, caches have to implement compression, so that address lists 
+from some well-known sites don't burst the seams of a DNS UDP packet.) Not only 
+does the compressor need to figure out which names can be compressed, but it 
+also needs to keep track of compression targets earlier in the packet. RFC 1035 
+doesn't make clear exactly what targets are allowed. (Most versions of BIND do 
+not use pointers except to compressible names; suffixes of the query name are 
+excluded. dnscache uses pointers to suffixes of the query name.) 
+
+Another problem with DNS compression is that it's not particularly effective. 
+LZ77 would have done a noticeably better job on current data, and a much better 
+job on new record types that might become popular in the future. (BIND versions 
+4.9.* through 8.1.2 compress names in new record types, such as RP and SRV, in 
+blatant violation of RFC 1035. The names are not decompressed by caches that do 
+not know about the new types. This is an interoperability disaster.) 
+
+Case independence 
+Once upon a time, for reasons that no longer matter, hostnames were often typed 
+in uppercase. One user would type IBM.COM, and another user would type ibm.com, 
+and both of them would expect to find the same host. 
+
+Experienced programmers stored hostnames in lowercase, and converted uppercase 
+to lowercase as part of the user interface. Hostname comparisons were simple 
+binary comparisons. 
+
+DNS, however, was not designed by experienced programmers. DNS clients send 
+hostnames exactly as typed by the user, without converting uppercase to 
+lowercase. DNS servers send some hostnames as typed by the system administrator, 
+without converting uppercase to lowercase. All implementors are forced to waste 
+time worrying about case. 
+
+The DNS protocol allows arbitrary bytes in hostnames. This flexibility would 
+have been convenient for several applications, notably in-addr.arpa, if the 
+designers hadn't screwed up their case handling. As is, binary names in DNS are 
+practically useless. 
+
+Record sets 
+The list of mail exchangers for a domain is an indivisible unit; if it is 
+truncated, mail can bounce. Other lists, such as the list of DNS servers or the 
+list of addresses, are also indivisible units, although the effects of 
+truncation are much less severe. 
+
+Unfortunately, in DNS packets, the list of mail exchangers is divided into 
+separate MX records. The MX records can even be (and, in responses to * queries, 
+often are) interleaved with other records. A cache has to sort the list of 
+records, preferably using a method that isn't painfully slow for large packets, 
+and partition the result into complete record sets. 
+
+Classes 
+Each DNS record is in a ``class.'' DNS allows 65536 different classes. In 
+theory, a name can have several NS records in different classes, delegating the 
+same domain to different servers in different classes. 
+
+Queries ask for records in a particular class. RFC 1034 allows queries to ask 
+for records in all classes, but this makes no sense: if multiple classes were 
+actually used then they would almost never be on the same server. The client 
+knows what class it's looking for, so it can specify a class; RFC 1123 section 
+6.1.2.2 requires this for the Internet class and recommends it in all cases. 
+
+RFC 1034 says that classes ``allow parallel use of different formats for data of 
+type address.'' This doesn't make sense. If DNS is used in a network with 
+multiple address formats, then one DNS server will want to provide addresses in 
+more than one format; but that DNS server is only in charge of one class. 
+Address format extensibility should have been provided in the address data 
+itself. 
+
+dnscache discards queries for non-Internet classes. 
+
+Miscellaneous implementation bugs 
+According to RFC 2308, some clients incorrectly treat an NXDOMAIN or no-records 
+response as a referral if there are NS records in the authority section, and 
+some clients incorrectly discard NXDOMAIN responses without the AA bit. 
+
+The Ultrix version of BIND sends queries with AD+CD set. 
+
+A client will receive a bogus response from a BIND cache if the client asks 
+about X, the cache already knows X CNAME Y, and the cache has to ask a server 
+about Y. The cache will forward the server's Y response, with Y as the query, to 
+the client. This bug was fixed in BIND 8.2.3. 
+
+There is at least one server that incorrectly produces NXDOMAIN for all non-A 
+queries, even for domains that exist: 
+
+     % date
+     Sat Nov  2 15:45:22 CST 2002
+     % dnsq any www.css.vtext.com njbdcss.vtext.com
+     255 www.css.vtext.com:
+     35 bytes, 1+0+0+0 records, response, nxdomain
+     query: 255 www.css.vtext.com
+     % dnsq aaaa www.css.vtext.com njbdcss.vtext.com
+     28 www.css.vtext.com:
+     35 bytes, 1+0+0+0 records, response, nxdomain
+     query: 28 www.css.vtext.com
+     % dnsq a www.css.vtext.com njbdcss.vtext.com
+     1 www.css.vtext.com:
+     51 bytes, 1+1+0+0 records, response, authoritative, noerror
+     query: 1 www.css.vtext.com
+     answer: www.css.vtext.com 0 A 66.174.3.10
+     % 
+If a client looks up AAAA before A, the NXDOMAIN will be cached, so the A query 
+will fail. 
+EOT
+
+cat > /var/dns/dnscache/README.dnscache-memory << EOT
+Tuning the cache
+
+The size of the cache for dnscache is configurable. The default cache size for a service installed by dnscache-conf is 1000000, that is, one million bytes. It may be increased to accomodate the resolver activity on your network, particularly useful when sharing a single dnscache among many hosts. 
+
+The envdir utility is used to parameterize the value of CACHESIZE for the dnscache service. To check the current value: 
+# cd /service/dnscache
+# cat env/CACHESIZE
+1000000
+
+The envdir utility is also used to parameterize the use of softlimit in the service run script, with the variable DATALIMIT: 
+# cat env/DATALIMIT
+3000000
+
+You can see where this is used in the argument for the -d option to softlimit in the run script: 
+# cat run
+#!/bin/sh
+exec 2>&1
+exec <seed
+exec envdir ./env sh -c '
+  exec envuidgid dnscache \
+    softlimit -o250 -d "$DATALIMIT" \
+      /usr/local/bin/dnscache
+'
+
+The difference between DATALIMIT and CACHESIZE is the overhead allowance to run the service under softlimit. In this case, the difference is 2000000. Consider this the "baseline" necessary to run the service, above and beyond the CACHESIZE. In other words, DATALIMIT needs to be set to a value sufficient to accomodate both the CACHESIZE, as well as an additional baseline amount adequate for the binaries and libraries loaded into memory when running the service. 
+
+If the dnscache service fails to run at all, it may be that the DATALIMIT parameter is insufficient for your platform. This is entirely possible these days, as the bloat from standard libraries tends to be increasing. Try raising the DATALIMIT in increments of 500000, then restarting the dnscache service --svc -t /service/dnscache-- until the log reports the service is running successfully. Make a note of the new "baseline" for your platform, calculating DATALIMIT minus CACHESIZE. 
+
+Now we return to the CACHESIZE. In an ideal world, what you are going for is a CACHESIZE sufficient to accomodate 24 to 72 hours worth of average dnscache activity. To get an idea of the dnscache activity on your server, you can benchmark from the logs: 
+$ tail /var/multilog/dnscache/current |tai64nlocal
+
+Look for a "stats" line, which (without the time-stamp) will look something like:
+
+stats 362 115206 1 0
+
+The second number (the "115206" here) represents the "cache motion": the number of bytes written to cache since the service started. Make a note of the number, then repeat the next day: 
+stats 10184 3689712 1 0
+
+In this example the 24-hour difference in cache-motion is 3,574,506, or about 3.5 million bytes cached per day. So, to cache a day's worth of lookups, you would want to increase your CACHESIZE to at least 3500000. 
+
+How many days should you try to cache? Most DNS records are set with a time-to-live (TTL) value of between one and three days. (Most of the ./add-* utilities for tinydns set a default TTL value of 86400 seconds, or one day.) When the TTL expires, dnscache needs to look up the record again anyway, so it doesn't do a lot of good to keep more than 3 days of cache. 
+
+For this contrived example, then, let's say we want to go for 3 days of cache. We figure that, with 512mb, our server has some memory to burn, and decide to increase the CACHESIZE to 11000000, 11 million bytes: 
+# cd /service/dnscache
+# echo "11000000" > env/CACHESIZE
+
+Don't forget to increase the DATALIMIT accordingly, figured as the new CACHESIZE, plus the "baseline" requirement as discussed above: 
+# echo "14000000" > env/DATALIMIT
+
+Restart the service to effect the new cache size: 
+# svc -t /service/dnscache
+
+Check the logs to make sure the service is running ok. Your cache should now be even more efficient, tuned to the activity of your particular network.
+EOT
+
+#DEBHELPER#
+
+exit 0
