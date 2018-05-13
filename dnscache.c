@@ -5,6 +5,7 @@
 #include "strerr.h"
 #include "error.h"
 #include "ip4.h"
+#include "str.h"
 #include "uint16.h"
 #include "uint64.h"
 #include "socket.h"
@@ -47,12 +48,20 @@ static int packetquery(char *buf,unsigned int len,char **q,char qtype[2],char qc
 
 
 static char myipoutgoing[4];
-static char myipincoming[4];
 static char buf[1024];
 uint64 numqueries = 0;
 
+struct interf {
+  char ip[4];
+  int udp53;
+  int tcp53;
+  iopause_fd *udp53io;
+  iopause_fd *tcp53io;
+  
+  struct interf *next;
+} ;
 
-static int udp53;
+struct interf *interhead = 0;
 
 #define MAXUDP 200
 static struct udpclient {
@@ -60,6 +69,7 @@ static struct udpclient {
   struct taia start;
   uint64 active; /* query number, if active; otherwise 0 */
   iopause_fd *io;
+  int fd;
   char ip[4];
   uint16 port;
   char id[2];
@@ -78,12 +88,12 @@ void u_respond(int j)
   if (!u[j].active) return;
   response_id(u[j].id);
   if (response_len > 512) response_tc();
-  socket_send4(udp53,response,response_len,u[j].ip,u[j].port);
+  socket_send4(u[j].fd,response,response_len,u[j].ip,u[j].port);
   log_querydone(&u[j].active,response_len);
   u[j].active = 0; --uactive;
 }
 
-void u_new(void)
+void u_new(int fd)
 {
   int j;
   int i;
@@ -108,8 +118,9 @@ void u_new(void)
 
   x = u + j;
   taia_now(&x->start);
+  x->fd = fd;
 
-  len = socket_recv4(udp53,buf,sizeof buf,x->ip,&x->port);
+  len = socket_recv4(x->fd,buf,sizeof buf,x->ip,&x->port);
   if (len == -1) return;
   if (len >= sizeof buf) return;
   if (x->port < 1024) if (x->port != 53) return;
@@ -129,8 +140,6 @@ void u_new(void)
 }
 
 
-static int tcp53;
-
 #define MAXTCP 20
 struct tcpclient {
   struct query q;
@@ -138,6 +147,7 @@ struct tcpclient {
   struct taia timeout;
   uint64 active; /* query number or 1, if active; otherwise 0 */
   iopause_fd *io;
+  int fd;
   char ip[4]; /* send response to this address */
   uint16 port; /* send response to this port */
   char id[2];
@@ -266,7 +276,7 @@ void t_rw(int j)
   x->state = 0;
 }
 
-void t_new(void)
+void t_new(int fd)
 {
   int i;
   int j;
@@ -290,8 +300,9 @@ void t_new(void)
 
   x = t + j;
   taia_now(&x->start);
+  x->fd = fd;
 
-  x->tcp = socket_accept4(tcp53,x->ip,&x->port);
+  x->tcp = socket_accept4(x->fd,x->ip,&x->port);
   if (x->tcp == -1) return;
   if (x->port < 1024) if (x->port != 53) { close(x->tcp); return; }
   if (!okclient(x->ip)) { close(x->tcp); return; }
@@ -304,18 +315,23 @@ void t_new(void)
   log_tcpopen(x->ip,x->port);
 }
 
+#define FATAL "dnscache: fatal: "
 
-iopause_fd io[3 + MAXUDP + MAXTCP];
-iopause_fd *udp53io;
-iopause_fd *tcp53io;
+iopause_fd *io = 0;
+int numio;
 
 static void doit(void)
 {
   int j;
   struct taia deadline;
   struct taia stamp;
+  struct interf *inter;
   int iolen;
   int r;
+
+  io = (iopause_fd *) alloc((numio + 1 + MAXUDP + MAXTCP) * sizeof(iopause_fd));
+  if (!io)
+    strerr_die2sys(111,FATAL,"unable to alloc io: ");
 
   for (;;) {
     taia_now(&stamp);
@@ -324,13 +340,15 @@ static void doit(void)
 
     iolen = 0;
 
-    udp53io = io + iolen++;
-    udp53io->fd = udp53;
-    udp53io->events = IOPAUSE_READ;
+    for (inter = interhead; inter != 0; inter = inter->next) {
+      inter->udp53io = io + iolen++;
+      inter->udp53io->fd = inter->udp53;
+      inter->udp53io->events = IOPAUSE_READ;
 
-    tcp53io = io + iolen++;
-    tcp53io->fd = tcp53;
-    tcp53io->events = IOPAUSE_READ;
+      inter->tcp53io = io + iolen++;
+      inter->tcp53io->fd = inter->tcp53;
+      inter->tcp53io->events = IOPAUSE_READ;
+    }
 
     for (j = 0;j < MAXUDP;++j)
       if (u[j].active) {
@@ -372,46 +390,82 @@ static void doit(void)
 	    t_rw(j);
       }
 
-    if (udp53io)
-      if (udp53io->revents)
-	u_new();
+    for (inter = interhead; inter != 0; inter = inter->next) {
+      if (inter->udp53io)
+        if (inter->udp53io->revents)
+	  u_new(inter->udp53);
 
-    if (tcp53io)
-      if (tcp53io->revents)
-	t_new();
+      if (inter->tcp53io)
+        if (inter->tcp53io->revents)
+	  t_new(inter->tcp53);
+    }
   }
 }
   
-#define FATAL "dnscache: fatal: "
-
 char seed[128];
 
 int main()
 {
   char *x;
+  int len;
+  int pos;
+  int oldpos;
+  char iptmp[4];
+  char iperr[IP4_FMT];
+  struct interf *inter;
+  struct interf *itmp;
   unsigned long cachesize;
 
   x = env_get("IP");
   if (!x)
     strerr_die2x(111,FATAL,"$IP not set");
-  if (!ip4_scan(x,myipincoming))
-    strerr_die3x(111,FATAL,"unable to parse IP address ",x);
 
-  udp53 = socket_udp();
-  if (udp53 == -1)
-    strerr_die2sys(111,FATAL,"unable to create UDP socket: ");
-  if (socket_bind4_reuse(udp53,myipincoming,53) == -1)
-    strerr_die2sys(111,FATAL,"unable to bind UDP socket: ");
+  len = str_len(x);
+  numio = pos = oldpos = 0;
+  
+  while (pos < len) {
+    if (pos) oldpos = pos + 1;
+    pos = oldpos + str_chr(x + oldpos,'/');
+    x[pos] = 0;
+    if (!str_len(x + oldpos)) continue;
+    
+    if (!ip4_scan(x + oldpos,iptmp))
+      strerr_die3x(111,FATAL,"unable to parse IP address ",x + oldpos);
+      
+    inter = (struct interf *) alloc(sizeof(struct interf));
+    
+    if (interhead == 0) interhead = inter;
+    else if (interhead->next == 0) interhead->next = inter;
+    else {
+      for (itmp = interhead; itmp->next != 0; itmp = itmp->next);
+      itmp->next = inter;
+    }
+    
+    inter->next = 0;
+    
+    inter->udp53 = socket_udp();
+    if (inter->udp53 == -1)
+      strerr_die4sys(111,FATAL,"unable to create UDP socket for IP address ",x + oldpos,": ");
+    if (socket_bind4_reuse(inter->udp53,iptmp,53) == -1)
+      strerr_die4sys(111,FATAL,"unable to bind UDP socket for IP address ",x + oldpos,": ");
+      
+    inter->tcp53 = socket_tcp();
+    if (inter->tcp53 == -1)
+      strerr_die4sys(111,FATAL,"unable to create TCP socket for IP address ",x + oldpos,": ");
+    if (socket_bind4_reuse(inter->tcp53,iptmp,53) == -1)
+      strerr_die4sys(111,FATAL,"unable to bind TCP socket for IP address ",x + oldpos,": ");
+      
+    numio++;
+    log_listen(iptmp);
+  }
 
-  tcp53 = socket_tcp();
-  if (tcp53 == -1)
-    strerr_die2sys(111,FATAL,"unable to create TCP socket: ");
-  if (socket_bind4_reuse(tcp53,myipincoming,53) == -1)
-    strerr_die2sys(111,FATAL,"unable to bind TCP socket: ");
+  if (interhead == 0)
+    strerr_die2x(111,FATAL,"no interfaces to listen on");
 
   droproot(FATAL);
 
-  socket_tryreservein(udp53,131072);
+  for (inter = interhead; inter != 0; inter = inter->next)
+    socket_tryreservein(inter->udp53,131072);
 
   byte_zero(seed,sizeof seed);
   read(0,seed,sizeof seed);
@@ -439,8 +493,11 @@ int main()
   if (!roots_init())
     strerr_die2sys(111,FATAL,"unable to read servers: ");
 
-  if (socket_listen(tcp53,20) == -1)
-    strerr_die2sys(111,FATAL,"unable to listen on TCP socket: ");
+  for (inter = interhead; inter != 0; inter = inter->next)
+    if (socket_listen(inter->tcp53,20) == -1) {
+      iperr[ip4_fmt(iperr,inter->ip)] = 0;
+      strerr_die4sys(111,FATAL,"unable to listen on TCP socket for IP ",iperr,": ");
+    }
 
   log_startup();
   doit();

@@ -94,6 +94,13 @@ void log_startup(void)
   line();
 }
 
+void log_listen(const char addr[4])
+{
+  string("listening on ");
+  ip(addr);
+  line();
+}
+
 void log_query(uint64 *qnum,const char client[4],unsigned int port,const char id[2],const char *q,const char qtype[2])
 {
   string("query "); number(*qnum); space();
