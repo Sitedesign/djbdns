@@ -4,6 +4,8 @@ SHELL=/bin/sh
 
 default: it
 
+include Makefile.sig
+
 alloc.a: \
 makelib alloc.o alloc_re.o getln.o getln2.o stralloc_cat.o \
 stralloc_catb.o stralloc_cats.o stralloc_copy.o stralloc_eady.o \
@@ -149,13 +151,13 @@ compile byte_zero.c byte.h
 
 cache.o: \
 compile cache.c alloc.h byte.h uint32.h exit.h tai.h uint64.h cache.h \
-uint32.h uint64.h
+uint32.h uint64.h env.h error.h open.h openreadclose.h
 	./compile cache.c
 
 cachetest: \
-load cachetest.o cache.o libtai.a buffer.a alloc.a unix.a byte.a
-	./load cachetest cache.o libtai.a buffer.a alloc.a unix.a \
-	byte.a 
+load cachetest.o cache.o libtai.a buffer.a alloc.a unix.a byte.a env.a
+	./load cachetest cache.o libtai.a buffer.a unix.a env.a \
+	alloc.a byte.a
 
 cachetest.o: \
 compile cachetest.c buffer.h exit.h cache.h uint32.h uint64.h str.h
@@ -320,10 +322,10 @@ stralloc.h iopause.h taia.h tai.h uint64.h taia.h
 dnscache: \
 load dnscache.o droproot.o okclient.o log.o cache.o query.o \
 response.o dd.o roots.o iopause.o prot.o dns.a env.a alloc.a buffer.a \
-libtai.a unix.a byte.a socket.lib
+libtai.a unix.a byte.a sig.a socket.lib
 	./load dnscache droproot.o okclient.o log.o cache.o \
 	query.o response.o dd.o roots.o iopause.o prot.o dns.a \
-	env.a alloc.a buffer.a libtai.a unix.a byte.a  `cat \
+	env.a alloc.a buffer.a libtai.a unix.a byte.a sig.a  `cat \
 	socket.lib`
 
 dnscache-conf: \

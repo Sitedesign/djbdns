@@ -25,6 +25,9 @@
 #include "okclient.h"
 #include "droproot.h"
 #include "openreadclose.h"
+#ifdef DUMPCACHE
+#include "sig.h"
+#endif
 
 stralloc okrfc1918 = {0};
 
@@ -405,7 +408,18 @@ static void doit(void)
     }
   }
 }
-  
+
+#ifdef DUMPCACHE
+static void do_dump(void)
+{
+  int r;
+  r = cache_dump();
+  if (r < 0)
+    r = errno;
+  log_dump(r);
+}
+#endif
+ 
 char seed[128];
 
 int main()
@@ -491,6 +505,17 @@ int main()
   if (!cache_init(cachesize))
     strerr_die3x(111,FATAL,"not enough memory for cache of size ",x);
 
+#ifdef DUMPCACHE
+  x = env_get("SLURPCACHE");
+  if (x) {
+    int nb = cache_slurp(x);
+    if (nb < 0)
+      strerr_die4sys(111,FATAL,"unable to slurp cache ",x," : ");
+    else
+      log_slurp(nb);
+  }
+#endif
+
   if (env_get("HIDETTL"))
     response_hidettl();
   if (env_get("FORWARDONLY"))
@@ -519,6 +544,10 @@ int main()
       iperr[ip4_fmt(iperr,inter->ip)] = 0;
       strerr_die4sys(111,FATAL,"unable to listen on TCP socket for IP ",iperr,": ");
     }
+
+#ifdef DUMPCACHE
+  sig_catch(sig_alarm, do_dump);
+#endif
 
   log_startup();
   doit();

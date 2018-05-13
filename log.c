@@ -101,6 +101,20 @@ void log_listen(const char addr[4])
   line();
 }
 
+#ifdef DUMPCACHE
+void log_slurp(int nb)
+{
+  string("slurp "); number(nb);
+  line();
+}
+
+void log_dump(int err)
+{
+  string("dump err "); number(err);
+  line();
+}
+#endif
+
 void log_query(uint64 *qnum,const char client[4],unsigned int port,const char id[2],const char *q,const char qtype[2])
 {
   string("query "); number(*qnum); space();
