@@ -23,6 +23,9 @@
 #include "log.h"
 #include "okclient.h"
 #include "droproot.h"
+#include "openreadclose.h"
+
+stralloc okrfc1918 = {0};
 
 static int packetquery(char *buf,unsigned int len,char **q,char qtype[2],char qclass[2],char id[2])
 {
@@ -415,6 +418,7 @@ int main()
   struct interf *inter;
   struct interf *itmp;
   unsigned long cachesize;
+  unsigned int i, j, k;
 
   x = env_get("IP");
   if (!x)
@@ -489,6 +493,21 @@ int main()
     response_hidettl();
   if (env_get("FORWARDONLY"))
     query_forwardonly();
+
+  i = openreadclose("okrfc1918",&okrfc1918,64);
+  if (i) {
+    for(j = k = i = 0; i < okrfc1918.len; i++)
+      if (okrfc1918.s[i] == '\n')  {
+        okrfc1918.s[i] = '\0';
+        if (j + 4 > i)
+          strerr_die3x(111,FATAL,"badly malformed ip4 address in okrfc1918 ",okrfc1918.s+k);
+        if (!ip4_scan(okrfc1918.s+k,okrfc1918.s+j))
+          strerr_die3x(111,FATAL,"unable to parse address in okrfc1918 ",okrfc1918.s+k);
+        j += 4;
+        k = i + 1;
+      }
+    okrfc1918.len = j;
+  }
 
   if (!roots_init())
     strerr_die2sys(111,FATAL,"unable to read servers: ");

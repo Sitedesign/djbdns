@@ -229,6 +229,23 @@ void log_rr(const char server[4],const char *q,const char type[2],const char *bu
   line();
 }
 
+void log_denied_rr(const char server[4],const char *q,const char type[2],const char *buf,unsigned int len,unsigned int ttl)
+{
+  int i;
+
+  string("denied rr "); ip(server); space(); number(ttl); space();
+  logtype(type); space(); name(q); space();
+
+  for (i = 0;i < len;++i) {
+    hex(buf[i]);
+    if (i > 30) {
+      string("...");
+      break;
+    }
+  }
+  line();
+}
+
 void log_rrns(const char server[4],const char *q,const char *data,unsigned int ttl)
 {
   string("rr "); ip(server); space(); number(ttl);

@@ -32,6 +32,8 @@ extern void log_rrptr(const char *,const char *,const char *,unsigned int);
 extern void log_rrmx(const char *,const char *,const char *,const char *,unsigned int);
 extern void log_rrsoa(const char *,const char *,const char *,const char *,const char *,unsigned int);
 
+extern void log_denied_rr(const char *,const char *,const char *,const char *,unsigned int,unsigned int);
+
 extern void log_stats(void);
 
 #endif

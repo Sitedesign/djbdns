@@ -15,6 +15,8 @@
 
 static int flagforwardonly = 0;
 
+extern stralloc okrfc1918;
+
 void query_forwardonly(void)
 {
   flagforwardonly = 1;
@@ -157,6 +159,22 @@ static int smaller(char *buf,unsigned int len,unsigned int pos1,unsigned int pos
   return 0;
 }
 
+static int check_response_rfc1918(char *resp)
+{
+  unsigned char* uresp = (unsigned char *)resp;
+
+  if (uresp[0] == 0) return 1;
+  if (uresp[0] == 127) return 1;
+  if (uresp[0] == 169 && uresp[1] == 254) return 1;
+  if (uresp[0] == 10 ||
+     (uresp[0] == 172 && (uresp[1] >> 4) == (16 >> 4)) ||
+     (uresp[0] == 192 && uresp[1] == 168))
+      return 1;
+  if (uresp[0] == 224) return 1;
+
+  return 0;
+}
+
 static int doit(struct query *z,int state)
 {
   char key[257];
@@ -193,6 +211,8 @@ static int doit(struct query *z,int state)
   int k;
   int p;
   int q;
+  int r;
+  int allowresponse;
 
   errno = error_io;
   if (state == 1) goto HAVEPACKET;
@@ -643,6 +663,16 @@ static int doit(struct query *z,int state)
         pos = dns_packet_copy(buf,len,pos,header,10); if (!pos) goto DIE;
         if (byte_equal(header + 8,2,"\0\4")) {
           pos = dns_packet_copy(buf,len,pos,header,4); if (!pos) goto DIE;
+	  if (okrfc1918.len && check_response_rfc1918(header)) {
+	    allowresponse = 0;
+	    for(r = 0; r < okrfc1918.len; r+= 4)
+	      if (byte_equal(whichserver,4,okrfc1918.s+r))
+	    	allowresponse = 1;
+	    if (!allowresponse) {
+              log_denied_rr(whichserver,t1,DNS_T_A,header,4,ttl);
+	      goto NXDOMAIN;
+	    }
+	  }
           save_data(header,4);
           log_rr(whichserver,t1,DNS_T_A,header,4,ttl);
         }
