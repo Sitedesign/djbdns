@@ -58,6 +58,7 @@ int main(int argc,char **argv)
   start("Makefile");
   outs("tcp.cdb: tcp\n");
   outs("\ttcprules tcp.cdb tcp.tmp < tcp\n");
+  outs("\tchmod 644 tcp.cdb\n");
   finish();
   perm(0644);
 
