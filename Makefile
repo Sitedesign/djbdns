@@ -626,9 +626,9 @@ iopause.h taia.h tai.h uint64.h taia.h uint16.h parsetype.h
 	./compile parsetype.c
 
 pickdns: \
-load pickdns.o server.o response.o droproot.o qlog.o prot.o dns.a \
+load pickdns.o server.o iopause.o response.o droproot.o qlog.o prot.o dns.a \
 env.a libtai.a cdb.a alloc.a buffer.a unix.a byte.a socket.lib
-	./load pickdns server.o response.o droproot.o qlog.o \
+	./load pickdns server.o iopause.o response.o droproot.o qlog.o \
 	prot.o dns.a env.a libtai.a cdb.a alloc.a buffer.a unix.a \
 	byte.a  `cat socket.lib`
 
@@ -704,9 +704,9 @@ gen_alloc.h iopause.h taia.h tai.h uint64.h taia.h
 	./compile random-ip.c
 
 rbldns: \
-load rbldns.o server.o response.o dd.o droproot.o qlog.o prot.o dns.a \
+load rbldns.o server.o iopause.o response.o dd.o droproot.o qlog.o prot.o dns.a \
 env.a libtai.a cdb.a alloc.a buffer.a unix.a byte.a socket.lib
-	./load rbldns server.o response.o dd.o droproot.o qlog.o \
+	./load rbldns server.o iopause.o response.o dd.o droproot.o qlog.o \
 	prot.o dns.a env.a libtai.a cdb.a alloc.a buffer.a unix.a \
 	byte.a  `cat socket.lib`
 
@@ -774,7 +774,7 @@ server.o: \
 compile server.c byte.h case.h env.h buffer.h strerr.h ip4.h uint16.h \
 ndelay.h socket.h uint16.h droproot.h qlog.h uint16.h response.h \
 uint32.h dns.h stralloc.h gen_alloc.h iopause.h taia.h tai.h uint64.h \
-taia.h
+taia.h iopause.h alloc.h
 	./compile server.c
 
 setup: \
@@ -979,10 +979,10 @@ timeoutwrite.h
 	./compile timeoutwrite.c
 
 tinydns: \
-load tinydns.o server.o droproot.o tdlookup.o response.o qlog.o \
+load tinydns.o server.o iopause.o droproot.o tdlookup.o response.o qlog.o \
 prot.o dns.a libtai.a env.a cdb.a alloc.a buffer.a unix.a byte.a \
 socket.lib
-	./load tinydns server.o droproot.o tdlookup.o response.o \
+	./load tinydns server.o iopause.o droproot.o tdlookup.o response.o \
 	qlog.o prot.o dns.a libtai.a env.a cdb.a alloc.a buffer.a \
 	unix.a byte.a  `cat socket.lib`
 
@@ -1084,10 +1084,10 @@ compile utime.c scan.h exit.h
 	./compile utime.c
 
 walldns: \
-load walldns.o server.o response.o droproot.o qlog.o prot.o dd.o \
+load walldns.o server.o iopause.o response.o droproot.o qlog.o prot.o dd.o \
 dns.a env.a cdb.a alloc.a buffer.a unix.a byte.a socket.lib
-	./load walldns server.o response.o droproot.o qlog.o \
-	prot.o dd.o dns.a env.a cdb.a alloc.a buffer.a unix.a \
+	./load walldns server.o iopause.o response.o droproot.o qlog.o \
+	prot.o dd.o dns.a libtai.a env.a cdb.a alloc.a buffer.a unix.a \
 	byte.a  `cat socket.lib`
 
 walldns-conf: \
