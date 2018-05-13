@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <signal.h>
 #include "env.h"
 #include "exit.h"
 #include "scan.h"
@@ -420,6 +421,7 @@ int main()
   unsigned long cachesize;
   unsigned int i, j, k;
 
+  signal(SIGPIPE, SIG_IGN);
   x = env_get("IP");
   if (!x)
     strerr_die2x(111,FATAL,"$IP not set");
